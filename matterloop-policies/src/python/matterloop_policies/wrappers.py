@@ -116,6 +116,11 @@ class BudgetedAgentEndpoint(Generic[SpecT, ContextT, ResultT]):
         """原样暴露被代理 Agent 的发现信息。"""
         return self._endpoint.spec
 
+    @property
+    def team_instrumentation(self) -> object | None:
+        """转发底层 Endpoint 的可选 Team 观测能力。"""
+        return getattr(self._endpoint, "team_instrumentation", None)
+
     async def execute(self, context: ContextT) -> ResultT:
         """预留一次 Agent 任务，异常或取消时回滚。"""
         reservation = self._ledger.reserve(

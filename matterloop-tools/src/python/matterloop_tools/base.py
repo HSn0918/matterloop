@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from math import isfinite
@@ -150,6 +150,46 @@ class ToolResult:
     def __post_init__(self) -> None:
         """冻结结果元数据。"""
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+
+
+ToolInvocation = Callable[[], Awaitable[ToolResult]]
+"""执行一次已完成参数快照、工具租约和授权约束的调用。"""
+
+
+@runtime_checkable
+class ToolInvocationMiddleware(Protocol):
+    """在工具查找、授权和执行边界外包装一次调用。
+
+    中间件接收已经冻结的参数快照，不能修改注册表实际用于授权和执行的参数。调用
+    ``call_next`` 后，注册表仍负责租约、只读边界、业务授权和错误类型转换。该协议只
+    依赖 tools 公共 DTO，因此 observability 等上层组件可用结构化鸭子类型实现，而
+    tools 包无需反向依赖任何追踪 SDK。
+    """
+
+    async def invoke(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, object],
+        context: ToolContext,
+        call_next: ToolInvocation,
+    ) -> ToolResult:
+        """包装一次工具调用，并返回原始工具结果。"""
+        ...
+
+
+class PassthroughToolInvocationMiddleware:
+    """不改变调用行为的默认中间件。"""
+
+    async def invoke(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, object],
+        context: ToolContext,
+        call_next: ToolInvocation,
+    ) -> ToolResult:
+        """直接执行下一层调用。"""
+        del tool_name, arguments, context
+        return await call_next()
 
 
 class PermissionDecision(str, Enum):

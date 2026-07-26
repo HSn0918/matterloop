@@ -8,6 +8,19 @@ import logging
 from typing import Any, Protocol
 from uuid import uuid4
 
+from matterloop_observability._semantic_conventions import (
+    ATTR_AGENT,
+    ATTR_INPUT,
+    ATTR_MODEL,
+    ATTR_OUTPUT,
+    ATTR_PARAMETERS,
+    ATTR_RESPONSE_ID,
+    ATTR_RUN_ID,
+    ATTR_STEP_ID,
+    ATTR_USAGE_PREFIX,
+    GENERATION_SPAN_NAME,
+    INSTRUMENTATION_SCOPE,
+)
 from matterloop_observability.pipeline import BatchingPipeline
 from matterloop_observability.redaction import Redactor
 from matterloop_observability.spans import _now, _OpenSpan
@@ -76,21 +89,19 @@ class TracedModelClient:
             if self._trace_builder is not None:
                 parent_span_id = self._trace_builder.resolve_parent_span_id(run_id, step_id)
             attributes: dict[str, Any] = {
-                "matterloop.run_id": run_id,
-                "matterloop.input": self._serialize_messages(request),
-                "matterloop.parameters": self._serialize_parameters(request),
+                ATTR_RUN_ID: run_id,
+                ATTR_INPUT: self._serialize_messages(request),
+                ATTR_PARAMETERS: self._serialize_parameters(request),
             }
             if step_id is not None:
-                attributes["matterloop.step_id"] = step_id
+                attributes[ATTR_STEP_ID] = step_id
             if isinstance(agent, str) and agent.strip():
-                attributes["matterloop.agent"] = agent
+                attributes[ATTR_AGENT] = agent
             return _OpenSpan(
                 trace_id=run_id,
                 span_id=uuid4().hex,
                 parent_span_id=parent_span_id,
-                name=f"generation:{agent}"
-                if isinstance(agent, str) and agent.strip()
-                else "generation",
+                name=GENERATION_SPAN_NAME,
                 observation_type="generation",
                 started_at=_now(),
                 attributes=self._redact(attributes),
@@ -117,7 +128,7 @@ class TracedModelClient:
             if response is not None:
                 output_text = getattr(response, "output_text", None)
                 if isinstance(output_text, str):
-                    extra["matterloop.output"] = output_text
+                    extra[ATTR_OUTPUT] = output_text
                 usage = getattr(response, "usage", None)
                 if usage is not None:
                     for field in (
@@ -130,13 +141,13 @@ class TracedModelClient:
                     ):
                         value = getattr(usage, field, None)
                         if isinstance(value, int):
-                            extra[f"matterloop.usage.{field}"] = value
+                            extra[f"{ATTR_USAGE_PREFIX}.{field}"] = value
                 response_id = getattr(response, "response_id", None)
                 if isinstance(response_id, str) and response_id.strip():
-                    extra["matterloop.response_id"] = response_id
+                    extra[ATTR_RESPONSE_ID] = response_id
                 model = self._describe_model(response)
                 if model is not None:
-                    extra["matterloop.model"] = model
+                    extra[ATTR_MODEL] = model
             record = span.close(
                 _now(),
                 level=level,
@@ -231,7 +242,7 @@ class OpenTelemetryModelClient:
                 "matterloop-observability[otel]"
             ) from exc
         self._client = client
-        self._tracer = tracer_provider.get_tracer("matterloop.observability")
+        self._tracer = tracer_provider.get_tracer(INSTRUMENTATION_SCOPE)
         self._redactor = redactor or Redactor()
 
     async def generate(self, request: Any) -> Any:
@@ -241,12 +252,8 @@ class OpenTelemetryModelClient:
         if not isinstance(run_id, str) or not run_id.strip():
             return await self._client.generate(request)
 
-        agent = metadata.get("agent")
-        span_name = (
-            f"generation:{agent}" if isinstance(agent, str) and agent.strip() else "generation"
-        )
         try:
-            span = self._tracer.start_span(span_name)
+            span = self._tracer.start_span(GENERATION_SPAN_NAME)
             token = self._context.attach(self._trace.set_span_in_context(span))
         except Exception:
             logger.exception("实时 generation 跨度创建失败，改为直接透传模型调用")
@@ -273,9 +280,13 @@ class OpenTelemetryModelClient:
         finally:
             try:
                 self._context.detach(token)
-                span.end()
             except Exception:
-                logger.exception("实时 generation 跨度关闭失败")
+                logger.exception("实时 generation OTel 上下文解绑失败")
+            finally:
+                try:
+                    span.end()
+                except Exception:
+                    logger.exception("实时 generation Span 结束失败")
 
     async def aclose(self) -> None:
         """把关闭委托给被包装的客户端。"""
@@ -291,11 +302,11 @@ class OpenTelemetryModelClient:
         metadata: dict[str, Any],
     ) -> None:
         attributes: dict[str, Any] = {
-            "matterloop.run_id": run_id,
-            "matterloop.input": _serialize_messages(request),
-            "matterloop.parameters": _serialize_parameters(request),
+            ATTR_RUN_ID: run_id,
+            ATTR_INPUT: _serialize_messages(request),
+            ATTR_PARAMETERS: _serialize_parameters(request),
         }
-        for field, attribute in (("step_id", "matterloop.step_id"), ("agent", "matterloop.agent")):
+        for field, attribute in (("step_id", ATTR_STEP_ID), ("agent", ATTR_AGENT)):
             value = metadata.get(field)
             if isinstance(value, str) and value.strip():
                 attributes[attribute] = value
@@ -348,7 +359,7 @@ def _response_attributes(client: _SupportsGenerate, response: Any) -> dict[str, 
     attributes: dict[str, Any] = {}
     output_text = getattr(response, "output_text", None)
     if isinstance(output_text, str):
-        attributes["matterloop.output"] = output_text
+        attributes[ATTR_OUTPUT] = output_text
     usage = getattr(response, "usage", None)
     if usage is not None:
         for field in (
@@ -361,10 +372,10 @@ def _response_attributes(client: _SupportsGenerate, response: Any) -> dict[str, 
         ):
             value = getattr(usage, field, None)
             if isinstance(value, int):
-                attributes[f"matterloop.usage.{field}"] = value
+                attributes[f"{ATTR_USAGE_PREFIX}.{field}"] = value
     response_id = getattr(response, "response_id", None)
     if isinstance(response_id, str) and response_id.strip():
-        attributes["matterloop.response_id"] = response_id
+        attributes[ATTR_RESPONSE_ID] = response_id
     metadata = getattr(response, "metadata", None) or {}
     model = metadata.get("model")
     if not isinstance(model, str) or not model.strip():
@@ -378,7 +389,7 @@ def _response_attributes(client: _SupportsGenerate, response: Any) -> dict[str, 
             None,
         )
     if isinstance(model, str) and model.strip():
-        attributes["matterloop.model"] = model
+        attributes[ATTR_MODEL] = model
     return attributes
 
 

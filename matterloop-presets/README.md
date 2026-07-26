@@ -99,8 +99,15 @@ runtime = build_production_runtime(
 `trace_exporter` 是可选的：传入普通 `SpanExporter`（如 `JsonlExporter`）时，preset 会把
 `TraceBuilder` 挂入审计事件管线、把模型客户端包装为 `TracedModelClient`，并在
 `ProductionRuntime.aclose()` 时自动排空导出流水线。传入共享 `TracerProvider` 的 `OtelExporter` 时，
-preset 改为实时 OTel Context：`matterloop.run`、各执行阶段、generation 以及 SQLAlchemy/HTTP 等自动
-instrumentation 的 Span 处在同一条 Trace。Provider 的创建、全局注册和关闭仍由应用负责；完整的数据库
+preset 改为实时 OTel Context：`matterloop.run`、各执行阶段、`matterloop.generation`、
+`matterloop.tool` 以及 SQLAlchemy/HTTP 等自动 instrumentation 的 Span 处在同一条 Trace。通过
+`LoopAgentEndpoint` 把该 `worker_runtime` 注册为子 Agent 时，Team 控制器会自动复用这套 Provider，
+无需再次配置即可增加 `matterloop.team` 和 `matterloop.team.agent`。通过
+`tools=` 显式传入默认执行器工具；`tool_authorizer=` 设置授权器；工具载荷默认不采集原文，仅记录大小和
+SHA-256。只有显式传入 `capture_tool_payloads=True` 时才按原文采集（默认限制 4096 字节，可用
+`capture_max_body_bytes=` 覆盖）。runtime 会先等待在途运行和工具调用结束，再 force-flush 共享 Provider；
+Provider 的创建、全局注册和最终
+shutdown 仍由应用负责；完整的数据库
 配置见 [matterloop-observability](../matterloop-observability/README.md#生产环境与数据库共用一条实时-otel-trace)。
 阻塞/暂停会把 W3C `traceparent`/`tracestate` 与 Loop checkpoint 使用同一次 CAS 持久化，恢复会创建真实
 子 Span，不依赖 `run_id` 派生或合成父节点；W3C baggage 不会写入 checkpoint。

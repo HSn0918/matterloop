@@ -14,6 +14,7 @@ from matterloop_agents.collaboration.models import (
     AgentTaskContext,
     TaskResult,
 )
+from matterloop_agents.collaboration.protocols import TeamInstrumentation
 
 
 @runtime_checkable
@@ -35,6 +36,7 @@ class LoopAgentEndpoint:
     Args:
         spec: Agent 的稳定标识、能力和并发上限。
         runtime: 用户显式构造并注入的异步 Loop 运行时。
+            Runtime 暴露 ``team_instrumentation`` 时，控制器会自动复用其观测配置。
         limits: 每个团队任务映射到 Loop 后使用的执行边界。
         metadata: 追加到每个 Loop 请求的只读业务元数据。
     """
@@ -56,6 +58,12 @@ class LoopAgentEndpoint:
     def spec(self) -> AgentSpec:
         """返回目录发现所需的不可变 Agent 规范。"""
         return self._spec
+
+    @property
+    def team_instrumentation(self) -> TeamInstrumentation | None:
+        """转发子 Runtime 已启用的 Team 观测能力，供控制器自动装配。"""
+        candidate = getattr(self._runtime, "team_instrumentation", None)
+        return candidate if isinstance(candidate, TeamInstrumentation) else None
 
     async def execute(self, context: AgentTaskContext) -> TaskResult:
         """把团队任务映射成 Loop 请求并还原为团队任务结果。
@@ -90,6 +98,9 @@ class LoopAgentEndpoint:
                 ),
                 "usage_scopes": usage_scopes,
                 "dependency_outputs": tuple(result.output for result in context.dependency_results),
+                # 仅携带标准 W3C traceparent/tracestate；由可选中间件注入，业务调用方不可
+                # 通过 TeamRequest/TaskSpec metadata 覆盖。远端 Loop 运行时应原样传递该字段。
+                "propagation_context": dict(context.propagation_context),
                 # 团队任务元数据不可信；该保留字段必须最后写入，调用方不能提升子 Agent 权限。
                 "tool_access_scope": ToolAccessScope.READ_ONLY.value,
             },

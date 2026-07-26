@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import Coroutine, Iterable
 from concurrent.futures import Future
@@ -19,6 +20,7 @@ from matterloop_agents.collaboration.models import (
 from matterloop_agents.collaboration.orchestrator import TeamOrchestrator
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -47,6 +49,11 @@ class AsyncTeamRuntime:
         self._orchestrator = orchestrator
         self._resources = tuple(resources)
         self._closed = False
+        self._operation_lock = asyncio.Lock()
+        self._active_operations = 0
+        self._operations_drained = asyncio.Event()
+        self._operations_drained.set()
+        self._close_task: asyncio.Task[None] | None = None
 
     def create_run_id(self) -> str:
         """创建新的团队运行标识。"""
@@ -68,8 +75,11 @@ class AsyncTeamRuntime:
         Returns:
             最新团队运行结果。
         """
-        self._ensure_open()
-        return await self._orchestrator.run(request, run_id=run_id)
+        await self._begin_operation()
+        try:
+            return await self._orchestrator.run(request, run_id=run_id)
+        finally:
+            await self._end_operation()
 
     async def resume(self, run_id: str) -> TeamResult:
         """异步恢复一次暂停或阻塞运行。
@@ -80,8 +90,11 @@ class AsyncTeamRuntime:
         Returns:
             恢复后的最新结果。
         """
-        self._ensure_open()
-        return await self._orchestrator.resume(run_id)
+        await self._begin_operation()
+        try:
+            return await self._orchestrator.resume(run_id)
+        finally:
+            await self._end_operation()
 
     async def submit_human_response(
         self,
@@ -97,8 +110,11 @@ class AsyncTeamRuntime:
         Returns:
             提交后仍暂停或已阻塞的最新结果。
         """
-        self._ensure_open()
-        return await self._orchestrator.submit_human_response(run_id, response)
+        await self._begin_operation()
+        try:
+            return await self._orchestrator.submit_human_response(run_id, response)
+        finally:
+            await self._end_operation()
 
     async def cancel(self, run_id: str) -> bool:
         """请求取消团队运行。
@@ -130,10 +146,18 @@ class AsyncTeamRuntime:
         return await self._orchestrator.list()
 
     async def aclose(self) -> None:
-        """按注册逆序关闭资源；可重复调用。"""
-        if self._closed:
-            return
-        self._closed = True
+        """拒绝新操作，drain 在途 Team 调用后按逆序关闭资源；可并发、可重复调用。"""
+        async with self._operation_lock:
+            if self._close_task is None:
+                self._closed = True
+                self._close_task = asyncio.create_task(self._close_resources())
+                self._close_task.add_done_callback(self._consume_close_exception)
+            close_task = self._close_task
+        await asyncio.shield(close_task)
+
+    async def _close_resources(self) -> None:
+        """独立于任一调用方 Task 完成 drain 与资源关闭。"""
+        await self._operations_drained.wait()
         first_error: Exception | None = None
         for resource in reversed(self._resources):
             try:
@@ -144,6 +168,13 @@ class AsyncTeamRuntime:
         if first_error is not None:
             raise first_error
 
+    @staticmethod
+    def _consume_close_exception(task: asyncio.Task[None]) -> None:
+        """避免所有等待方均被取消时产生未获取的后台 Task 异常告警。"""
+        if task.cancelled():
+            return
+        task.exception()
+
     async def __aenter__(self) -> AsyncTeamRuntime:
         """返回当前异步团队运行时。"""
         self._ensure_open()
@@ -151,11 +182,31 @@ class AsyncTeamRuntime:
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
         """离开异步上下文时关闭资源。"""
-        await self.aclose()
+        try:
+            await self.aclose()
+        except Exception:
+            if exc is None:
+                raise
+            logger.exception("AsyncTeamRuntime close failed while preserving the active exception")
 
     def _ensure_open(self) -> None:
         if self._closed:
             raise TeamRuntimeClosedError("async team runtime is closed")
+
+    async def _begin_operation(self) -> None:
+        """在关闭开始前登记一次可能持有 Team/Agent Span 的操作。"""
+        async with self._operation_lock:
+            if self._closed:
+                raise TeamRuntimeClosedError("async team runtime is closed")
+            self._active_operations += 1
+            self._operations_drained.clear()
+
+    async def _end_operation(self) -> None:
+        """在运行结束后解除登记，允许 exporter 等资源安全关闭。"""
+        async with self._operation_lock:
+            self._active_operations -= 1
+            if self._active_operations == 0:
+                self._operations_drained.set()
 
 
 class LocalTeamRuntime:

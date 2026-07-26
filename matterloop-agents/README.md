@@ -111,6 +111,12 @@ runtime = AsyncTeamRuntime(
 )
 ```
 
+如果 `child_runtime` 是 production preset 在传入 `OtelExporter` 后创建的 `worker_runtime`，
+`LoopAgentEndpoint` 会暴露其观测能力，`TeamOrchestrator` 自动安装 Team 事件追踪与任务中间件；上述
+components 不需要额外 OTel 字段。Endpoint 必须先注册，再构造 `TeamOrchestrator`。
+自定义 Endpoint 代理若包裹 `LoopAgentEndpoint`，应原样转发可选的 `team_instrumentation` 属性；
+内置 `BudgetedAgentEndpoint` 已处理该转发。
+
 `reviewer=None` 会自动接受所有已通过任务验证的草稿；`ResultSuccessVerifier` 也只检查 success 标志。
 它们适合测试，不构成生产验收。生产团队应配置领域 Verifier、整体 Reviewer 和真实审批门。
 
@@ -182,7 +188,7 @@ if interaction is not None:
 - `TeamLimits(max_tasks, max_concurrency, max_task_attempts, max_cycles, max_plan_revisions, timeout_seconds)`：默认 50、4、3、3、2 和无超时。
 - `AgentSpec(agent_id, capabilities, max_concurrency, version, description, role, metadata)`。
 - `TaskSpec(task_id, description, capability, dependencies, acceptance_criteria, requires_approval, priority, metadata, replay_safe)`；`replay_safe` 默认 `False`，只有明确可重放的纯计算任务才会在崩溃后自动再次执行。
-- `AgentTaskContext(team_run_id, request, task, agent_id, attempt, dependency_results, previous_error, human_feedback)`。
+- `AgentTaskContext(team_run_id, request, task, agent_id, attempt, dependency_results, previous_error, human_feedback, propagation_context)`：`propagation_context` 仅用于中间件向 Endpoint 传递标准关联载体。
 - `TaskResult(task_id, agent_id, success, output, artifacts, error, attempt, metadata)`。
 - `TaskVerification(passed, feedback, score, evidence, failed_criteria)`。
 - `TaskState(spec, status, attempt, approval_granted, assigned_agent, result, verification, error)`。
@@ -190,11 +196,12 @@ if interaction is not None:
 - `TeamReviewContext(run_id, request, cycle, plan_revision, task_results, draft_output, prior_reviews, human_feedback)`。
 - `TeamReview(action, feedback, score, evidence, failed_criteria, interaction)`。
 - `TeamCycleRecord(cycle, plan_revision, tasks, draft_output, review, error)`。
-- `TeamSnapshot(request, tasks, run_id, status, version, stop_reason, output, error, cycle, plan_revision, cycle_history, pending_interaction, pending_review, human_interactions, review_approved_cycle, active_elapsed_seconds, active_started_at, created_at, updated_at)`。
+- `TeamSnapshot(request, tasks, run_id, status, version, stop_reason, output, error, cycle, plan_revision, cycle_history, pending_interaction, pending_review, human_interactions, review_approved_cycle, active_elapsed_seconds, active_started_at, propagation_context, created_at, updated_at)`：`propagation_context` 随快照 CAS 持久化，只保存受信的 W3C carrier。
 - `TeamResult(run_id, status, task_results, output, stop_reason, error, cycle, cycle_history, pending_interaction, human_interactions, started_at, finished_at)`。
 - `TeamEvent(event_type, snapshot, detail, metadata, occurred_at)`：事件携带当时的完整快照，可能很大且敏感。
 - `AgentMessage(team_run_id, sender_agent_id, recipient_agent_id, message_type, content, correlation_id, metadata, message_id, created_at)`：可选 Mailbox DTO，不是全局状态通道。
-- `TeamOrchestratorComponents(planner, agents, selection_policy, verifier, approval_gate, repository, events, aggregator, reviewer)`。
+- `TeamOrchestratorComponents(planner, agents, selection_policy, verifier, approval_gate, repository, events, aggregator, reviewer, task_middleware, snapshot_preparer)`：`task_middleware` 在 Endpoint 调用边界包裹一次任务，可传递不可变上下文副本但不能改变业务结果语义；`snapshot_preparer` 在 CAS 保存前补充可持久化的中立关联字段。
+- `TeamSnapshotPreparer.prepare_snapshot(snapshot)`：返回仅补充中立关联字段的快照副本，故障由控制器隔离。
 
 `TeamReviewAction` 为 `ACCEPT/REPLAN/REQUEST_HUMAN/STOP`。团队停止原因区分完成、审批/人工拒绝、任务
 失败、无可用 Agent、容量、死锁、取消、超时、cycle/revision 上限、预算耗尽、恢复对账和组件错误。
@@ -208,7 +215,7 @@ if interaction is not None:
 - `ResourceLimitExceededError` 映射为 `BLOCKED/BUDGET_EXHAUSTED`，不作为普通任务错误重试。
 - Team 事件可能包含 goal、完整输出、人工意见和 metadata；Publisher 与 Repository 都要实施租户
   隔离、加密、保留期和脱敏。
-- `AsyncTeamRuntime` 只关闭 `resources` 中的对象；Directory、模型、仓储和事件后端不会被自动接管。
+- `AsyncTeamRuntime` 会先拒绝新操作、等待在途 `run`/`resume`/人工响应结束，再关闭 `resources` 中的对象；Directory、模型、仓储和事件后端不会被自动接管。
 - `LocalTeamRuntime` 使用专用事件循环线程，必须关闭，也不能在该线程内阻塞调用自己。
 
 完整状态与模块边界见[架构说明](../docs/architecture.md)，跨进程部署见

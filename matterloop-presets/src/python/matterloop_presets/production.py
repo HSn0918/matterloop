@@ -2,12 +2,14 @@
 
 import asyncio
 import logging
+from collections.abc import Iterable
 
 from matterloop_core import ApprovalGate, CheckpointStore, EventPublisher
 from matterloop_models import ModelClient
 from matterloop_observability import (
     BatchingPipeline,
     CompositeEventPublisher,
+    OpenTelemetryToolMiddleware,
     OpenTelemetryTracePublisher,
     OtelExporter,
     PublisherFailureMode,
@@ -24,7 +26,7 @@ from matterloop_runtime import (
     RunEventReader,
     RunRepository,
 )
-from matterloop_tools import ToolRegistry
+from matterloop_tools import Tool, ToolAuthorizer, ToolRegistry
 
 from matterloop_presets._assembly import _assemble_runtime
 from matterloop_presets.config import ProductionPresetConfig
@@ -56,6 +58,10 @@ def build_production_runtime(
     event_reader: RunEventReader | None = None,
     approval_gate: ApprovalGate | None = None,
     trace_exporter: SpanExporter | None = None,
+    tools: Iterable[Tool] = (),
+    tool_authorizer: ToolAuthorizer | None = None,
+    capture_tool_payloads: bool = False,
+    capture_max_body_bytes: int = OpenTelemetryToolMiddleware.DEFAULT_CAPTURE_MAX_BODY_BYTES,
 ) -> ProductionRuntime:
     """构建显式基础设施依赖的生产队列与 worker 组合运行时。
 
@@ -73,7 +79,13 @@ def build_production_runtime(
         approval_gate: 可选生产审批实现。
         trace_exporter: 可选跨度与评分导出器。传入 OtelExporter 时创建实时 OTel 上下文，
             让数据库等自动 instrumentation 产生的 Span 进入同一条 Agent Trace；其他导出器
-            使用 TraceBuilder 和 TracedModelClient 重建关闭后的树形记录。
+            使用 TraceBuilder 和 TracedModelClient 重建关闭后的树形记录。由该 worker runtime
+            构造的 LoopAgentEndpoint 会自动把同一 Provider 扩展到 Team/子 Agent Span。
+        tools: 默认执行器启动时可发现的工具；显式传入的工具会进入模型 allowlist。
+        tool_authorizer: 可选工具授权器。
+        capture_tool_payloads: 是否记录实时 OTel 工具 Span 的 arguments/result 有界原文预览；
+            默认仅记录字节数和 SHA-256。
+        capture_max_body_bytes: 实时 OTel 工具 Span 中 arguments/result 各自的原文预览上限。
 
     Returns:
         分离队列客户端与实际 Loop worker 的生产运行时。
@@ -101,7 +113,9 @@ def build_production_runtime(
     assert audit_publisher is not None
 
     actual_config = config or ProductionPresetConfig()
-    tools = ToolRegistry()
+    tool_instances = tuple(tools)
+    tool_middleware = None
+    team_instrumentation = None
     publishers: tuple[EventPublisher, ...] = (audit_publisher,)
     extra_resources: tuple[AsyncClosable, ...] = ()
     actual_model = model
@@ -109,19 +123,31 @@ def build_production_runtime(
         if trace_exporter.owns_tracer_provider:
             logger.warning(
                 "OtelExporter(endpoint=...) 的内部 TracerProvider 未注册为全局 Provider；"
-                "数据库和 HTTP 自动 instrumentation 不会进入 MatterLoop Trace，且调用方需管理其关闭"
+                "数据库和 HTTP 自动 instrumentation 不会进入 MatterLoop Trace"
             )
         publishers = (
             audit_publisher,
             OpenTelemetryTracePublisher(trace_exporter.tracer_provider),
         )
         actual_model = wrap_otel_model_client(model, trace_exporter.tracer_provider)
+        tool_middleware = OpenTelemetryToolMiddleware(
+            trace_exporter.tracer_provider,
+            capture_tool_payloads=capture_tool_payloads,
+            capture_max_body_bytes=capture_max_body_bytes,
+        )
+        team_instrumentation = trace_exporter.team_instrumentation
+        extra_resources = (trace_exporter,)
     elif trace_exporter is not None:
         pipeline = BatchingPipeline(trace_exporter)
         trace_builder = TraceBuilder(pipeline)
         publishers = (audit_publisher, trace_builder)
         actual_model = wrap_model_client(model, trace_builder)
         extra_resources = (_PipelineShutdownResource(pipeline),)
+    tool_registry = ToolRegistry(
+        tool_instances,
+        authorizer=tool_authorizer,
+        middleware=tool_middleware,
+    )
     worker_runtime = _assemble_runtime(
         model=actual_model,
         config=actual_config,
@@ -131,9 +157,10 @@ def build_production_runtime(
             failure_mode=PublisherFailureMode.RAISE,
         ),
         approval_gate=approval_gate or AllowAllApproval(),
-        tool_registries={"default": tools},
-        executor_tools={"default": ()},
+        tool_registries={"default": tool_registry},
+        executor_tools={"default": tool_registry.names()},
         extra_resources=extra_resources,
+        team_instrumentation=team_instrumentation,
     )
     actual_event_reader = event_reader
     if actual_event_reader is None and isinstance(audit_publisher, RunEventReader):
@@ -157,6 +184,10 @@ def build_production_local_runtime(
     event_reader: RunEventReader | None = None,
     approval_gate: ApprovalGate | None = None,
     trace_exporter: SpanExporter | None = None,
+    tools: Iterable[Tool] = (),
+    tool_authorizer: ToolAuthorizer | None = None,
+    capture_tool_payloads: bool = False,
+    capture_max_body_bytes: int = OpenTelemetryToolMiddleware.DEFAULT_CAPTURE_MAX_BODY_BYTES,
 ) -> ProductionLocalRuntime:
     """构建同步生产 worker，并通过属性保留异步队列客户端。
 
@@ -170,6 +201,10 @@ def build_production_local_runtime(
         event_reader: 可选审计事件读取器。
         approval_gate: 可选生产审批实现。
         trace_exporter: 可选跨度与评分导出器，语义与异步构建函数一致。
+        tools: 默认执行器启动时可发现的工具。
+        tool_authorizer: 可选工具授权器。
+        capture_tool_payloads: 是否记录实时 OTel 工具 Span 的 arguments/result 有界原文预览。
+        capture_max_body_bytes: 实时 OTel 工具 Span 中 arguments/result 各自的原文预览上限。
 
     Returns:
         同步 worker 门面与异步队列客户端的组合对象。
@@ -184,6 +219,10 @@ def build_production_local_runtime(
         event_reader=event_reader,
         approval_gate=approval_gate,
         trace_exporter=trace_exporter,
+        tools=tools,
+        tool_authorizer=tool_authorizer,
+        capture_tool_payloads=capture_tool_payloads,
+        capture_max_body_bytes=capture_max_body_bytes,
     )
     return ProductionLocalRuntime(runtime)
 

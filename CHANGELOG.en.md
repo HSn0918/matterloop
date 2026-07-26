@@ -21,6 +21,13 @@ version entry covers the complete component set instead of maintaining separate 
   during Loop execution and `OpenTelemetryModelClient` records nested generation spans, so database/HTTP
   auto-instrumentation joins the same trace; a block or pause persists W3C `traceparent`/`tracestate` in
   the same checkpoint CAS and resume creates a real child Span, while `run_id` remains business correlation.
+- Added `OpenTelemetryToolMiddleware` to record Tool, Skill, and MCP calls. By default it records only
+  payload size, SHA-256, and allowlisted semantic attributes. Verbatim bounded payload capture requires
+  explicit `capture_tool_payloads=True` (4096 bytes by default and configurable through
+  `capture_max_body_bytes`); the production preset accepts explicit `tools` and `tool_authorizer` inputs.
+- Added live OTel topology for Team and child-Agent execution. Team snapshots persist the W3C carrier,
+  preserving `matterloop.team -> matterloop.team.agent -> matterloop.run` parentage across pauses,
+  blocks, and cross-process resume.
 - Added the Core `CheckpointPreparer` protocol and `LoopContext.propagation_context`, allowing event
   publishers to place durable correlation data such as W3C propagation context into the checkpoint CAS;
   `CompositeEventPublisher` forwards the hook.
@@ -29,6 +36,12 @@ version entry covers the complete component set instead of maintaining separate 
 
 - The current checkpoint layout adds `propagation_context` and no longer carries `schema_version`; the
   Codec accepts only the complete layout with top-level `context`.
+- Standardized trace span names on fixed `matterloop.*` semantics and moved dynamic agent/executor data to
+  attributes. `OtelExporter.aclose()` now force-flushes every Provider and shuts down only an owned Provider.
+  This is an incompatible observability-schema change; existing dashboards, alerts, and queries must
+  migrate to the new fixed Span names.
+- Runtime close now drains in-flight Loop and tool calls before closing tools, models, and exporters, so a
+  late-ending `matterloop.tool` span cannot be lost after its Provider has shut down.
 
 ### Deprecated
 

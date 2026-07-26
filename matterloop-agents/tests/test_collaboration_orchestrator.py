@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import matterloop_agents.collaboration.runtime as team_runtime_module
 import pytest
@@ -41,6 +41,7 @@ from matterloop_agents.collaboration import (
     TeamSnapshot,
     TeamStatus,
     TeamStopReason,
+    TeamTaskInvocationMiddleware,
 )
 from matterloop_core import (
     ApprovalDecision,
@@ -100,6 +101,7 @@ def _orchestrator(
     approval_gate: TeamApprovalGate | None = None,
     repository: InMemoryTeamRepository | None = None,
     events: LocalTeamEventPublisher | None = None,
+    task_middleware: TeamTaskInvocationMiddleware | None = None,
 ) -> TeamOrchestrator:
     """用完全显式注入的内存组件装配测试控制器。"""
     directory = AgentDirectory()
@@ -115,6 +117,7 @@ def _orchestrator(
             repository=repository or InMemoryTeamRepository(),
             events=events or LocalTeamEventPublisher(),
             aggregator=ConcatenateResultAggregator(),
+            task_middleware=task_middleware,
         )
     )
 
@@ -162,6 +165,140 @@ async def test_team_orchestrator_executes_fan_out_and_fan_in_by_capability() -> 
         "coding",
     )
     assert result.completed_tasks == 3
+
+
+async def test_task_middleware_wraps_endpoint_with_an_isolated_context_copy() -> None:
+    """横切中间件可增加关联数据，且不改写控制器持有的原始上下文。"""
+
+    class PropagatingMiddleware:
+        async def invoke(self, context, call_next):
+            enriched = replace(
+                context,
+                propagation_context={"traceparent": "00-" + "a" * 32 + "-" + "b" * 16 + "-01"},
+            )
+            return await call_next(enriched)
+
+    endpoint = _endpoint("worker", "analysis")
+    result = await _orchestrator(
+        (TaskSpec("task", "执行分析", "analysis"),),
+        (endpoint,),
+        task_middleware=PropagatingMiddleware(),
+    ).run(TeamRequest("验证中间件"))
+
+    assert result.status is TeamStatus.COMPLETED
+    assert endpoint.calls[0].propagation_context == {
+        "traceparent": "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    }
+
+
+def test_w3c_propagation_context_accepts_empty_tracestate() -> None:
+    """W3C 允许空 tracestate，Team 快照和任务上下文都必须可持久化它。"""
+    carrier = {
+        "traceparent": "00-" + "a" * 32 + "-" + "b" * 16 + "-01",
+        "tracestate": "",
+    }
+    request = TeamRequest("验证 tracestate")
+    task = TaskSpec("task", "执行", "analysis")
+
+    context = AgentTaskContext("run", request, task, "worker", 1, propagation_context=carrier)
+    snapshot = TeamSnapshot(request, (), run_id="run", propagation_context=carrier)
+
+    assert context.propagation_context["tracestate"] == ""
+    assert snapshot.propagation_context["tracestate"] == ""
+
+
+async def test_async_team_runtime_drains_active_team_before_closing_resources() -> None:
+    """关闭必须等待慢 Endpoint 及其中的 Span 结束，不能抢先关闭 exporter。"""
+
+    class ClosingResource:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    endpoint = _endpoint("worker", "analysis", started=started, release=release)
+    resource = ClosingResource()
+    runtime = AsyncTeamRuntime(
+        _orchestrator(
+            (TaskSpec("task", "慢任务", "analysis"),),
+            (endpoint,),
+        ),
+        resources=(resource,),
+    )
+
+    running = asyncio.create_task(runtime.run(TeamRequest("关闭回归")))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    closing = asyncio.create_task(runtime.aclose())
+    await asyncio.sleep(0)
+    assert resource.closed is False
+
+    release.set()
+    result = await asyncio.wait_for(running, timeout=1)
+    await asyncio.wait_for(closing, timeout=1)
+
+    assert result.status is TeamStatus.COMPLETED
+    assert resource.closed is True
+
+
+async def test_cancelled_team_close_waiter_does_not_abandon_resource_close() -> None:
+    """取消首个 Team aclose 等待方后，后台关闭仍须完成且后续调用会等待它。"""
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+
+    class BlockingResource:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            close_started.set()
+            await release_close.wait()
+            self.closed = True
+
+    resource = BlockingResource()
+    runtime = AsyncTeamRuntime(
+        _orchestrator(
+            (TaskSpec("task", "不会执行", "analysis"),),
+            (_endpoint("worker", "analysis"),),
+        ),
+        resources=(resource,),
+    )
+    first_waiter = asyncio.create_task(runtime.aclose())
+    await close_started.wait()
+    first_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_waiter
+
+    second_waiter = asyncio.create_task(runtime.aclose())
+    await asyncio.sleep(0)
+    assert not second_waiter.done()
+    assert resource.closed is False
+
+    release_close.set()
+    await second_waiter
+    assert resource.closed is True
+
+
+async def test_team_runtime_context_exit_preserves_block_error_when_close_fails() -> None:
+    """资源关闭失败不得掩盖 Team async with 块内原始异常。"""
+
+    class FailingResource:
+        async def aclose(self) -> None:
+            raise RuntimeError("close failed")
+
+    runtime = AsyncTeamRuntime(
+        _orchestrator(
+            (TaskSpec("task", "不会执行", "analysis"),),
+            (_endpoint("worker", "analysis"),),
+        ),
+        resources=(FailingResource(),),
+    )
+
+    with pytest.raises(ValueError, match="block failed"):
+        async with runtime:
+            raise ValueError("block failed")
 
 
 async def test_failed_verification_retries_without_replanning() -> None:
@@ -508,6 +645,75 @@ async def test_component_timeout_error_is_not_misreported_as_team_deadline() -> 
     assert result.status is TeamStatus.FAILED
     assert result.stop_reason is TeamStopReason.COMPONENT_ERROR
     assert "planner backend timed out" in result.error
+
+
+async def test_auto_instrumentation_failure_is_isolated_after_audit_publish() -> None:
+    """自动观测发布失败不能阻断业务，且审计发布器必须先收到同一事件。"""
+    order: list[str] = []
+
+    class RaisingInstrumentationPublisher:
+        async def publish(self, event: TeamEvent) -> None:
+            order.append(f"instrumentation:{event.event_type.value}")
+            raise RuntimeError("instrumentation unavailable")
+
+    class PassthroughMiddleware:
+        async def invoke(self, context, call_next):
+            return await call_next(context)
+
+    class InstrumentedRuntime:
+        def __init__(self) -> None:
+            self.team_instrumentation = type(
+                "Instrumentation",
+                (),
+                {
+                    "event_publisher": RaisingInstrumentationPublisher(),
+                    "task_middleware": PassthroughMiddleware(),
+                },
+            )()
+
+        async def run(self, request, *, run_id=None) -> LoopResult:
+            del request
+            assert run_id is not None
+            return LoopResult(
+                run_id,
+                LoopStatus.COMPLETED,
+                "done",
+                1,
+                1,
+                1,
+                (),
+                StopReason.COMPLETED,
+            )
+
+    events = LocalTeamEventPublisher()
+    events.subscribe(lambda event: order.append(f"audit:{event.event_type.value}"))
+    directory = AgentDirectory()
+    directory.register(
+        LoopAgentEndpoint(
+            AgentSpec("worker", frozenset({"analysis"})),
+            InstrumentedRuntime(),
+        )
+    )
+    orchestrator = TeamOrchestrator(
+        TeamOrchestratorComponents(
+            planner=StaticTeamPlanner((TaskSpec("task", "执行", "analysis"),)),
+            agents=directory,
+            selection_policy=LeastBusyScheduler(),
+            verifier=ResultSuccessVerifier(),
+            approval_gate=AlwaysApproveTeamGate(),
+            repository=InMemoryTeamRepository(),
+            events=events,
+            aggregator=ConcatenateResultAggregator(),
+        )
+    )
+
+    result = await orchestrator.run(TeamRequest("观测故障隔离"))
+
+    assert result.status is TeamStatus.COMPLETED
+    for index in range(0, len(order), 2):
+        audit, instrumentation = order[index : index + 2]
+        assert audit.startswith("audit:")
+        assert instrumentation == audit.replace("audit:", "instrumentation:")
 
 
 async def test_team_timeout_includes_initial_lifecycle_events() -> None:

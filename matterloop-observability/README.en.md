@@ -144,9 +144,10 @@ When the application also enables OTel auto-instrumentation for SQLAlchemy, HTTP
 message queue, the best practice is for the **application to create exactly one `TracerProvider`**:
 set it as the global Provider first, then pass that same instance to `OtelExporter`. When the
 production preset receives an `OtelExporter`, it creates `matterloop.run`,
-Planner/Executor/Verifier, and generation spans while the Loop is actually running. Database and
-HTTP spans emitted by auto-instrumentation inherit the active phase and become children in the same
-trace. Before a block or pause, the live publisher writes the current `matterloop.run` W3C
+Planner/Executor/Verifier, `matterloop.generation`, and `matterloop.tool` spans while the Loop is
+actually running. Database and HTTP spans emitted by auto-instrumentation inherit the active phase
+and become children in the same trace. Before a block or pause, the live publisher writes the
+current `matterloop.run` W3C
 `traceparent`/`tracestate` into the same checkpoint CAS. Resume extracts that context to create a
 real child span, so cross-process recovery remains in one Trace with an exported parent. Only
 `traceparent`/`tracestate` are persisted: W3C baggage is excluded so business metadata cannot enter
@@ -186,15 +187,34 @@ runtime = build_production_runtime(
     checkpoint_store=checkpoint_store,
     audit_publisher=audit_publisher,
     trace_exporter=OtelExporter(tracer_provider=provider),
+    tools=production_tools,
 )
 ```
 
-On shutdown, first call `await runtime.aclose()`, then let the application call
-`provider.force_flush()` and `provider.shutdown()` on the Provider it owns. Do not use the internal
-Provider created by `OtelExporter(endpoint=...)` for database auto-instrumentation: it is not
-registered as the global Provider, so database spans would go to another trace (or the default
-no-op Provider). The production preset logs a warning for this configuration, and the caller still
-owns shutdown of the internal Provider.
+`await runtime.aclose()` force-flushes a shared Provider but does not shut it down; the application
+then calls `provider.shutdown()` on the Provider it owns. Do not use the internal Provider created
+by `OtelExporter(endpoint=...)` for database auto-instrumentation: it is not registered as the
+global Provider, so database spans would go to another trace (or the default no-op Provider). The
+production preset logs a warning for this configuration and flushes and shuts down that internal
+Provider when the runtime closes.
+
+## Tool call spans
+
+`OpenTelemetryToolMiddleware(provider)`, injected with `ToolRegistry(middleware=...)`, covers tool
+lookup, authorization, and execution. Success,
+`ToolResult.is_error`, permission denial, missing tools, and exceptions therefore all produce a
+`matterloop.tool` span. The Worker propagates the model's existing `ToolCall.call_id` as
+`matterloop.tool_call_id`; only direct calls without an ID receive a generated UUID.
+
+By default, arguments, free-text results, and Skill bodies are not written to Trace; arguments/results
+retain only their UTF-8 byte count and SHA-256. Set `capture_tool_payloads=True` explicitly to record a
+verbatim preview, bounded to 4096 UTF-8 bytes per payload by default and configurable with
+`capture_max_body_bytes`. That opt-in can send credentials, PII, or untrusted content to the trace backend,
+so enable it only with appropriate access controls and retention. Allowlisted Skill and MCP metadata is
+mapped to dedicated attributes instead of copying arbitrary `ToolResult.metadata`; a regular Tool's
+`truncated` metadata is never written as an MCP attribute. The production preset installs this middleware
+for an `OtelExporter`; `tools=` explicitly defines the default executor's tool allowlist. Runtime close
+waits for in-flight Loop and tool calls before flushing the Provider.
 
 ## Model call spans
 
@@ -205,7 +225,7 @@ client = wrap_model_client(model_client, trace_builder)
 ```
 
 `TracedModelClient(client, trace_builder, pipeline)` wraps any `ModelClient`: when the request
-metadata contains a `run_id`, it records a generation span carrying the redacted input messages,
+metadata contains a `run_id`, it records a fixed `matterloop.generation` span carrying the redacted input messages,
 sampling parameters, output text, and six token usage fields. The parent span is resolved by the
 `trace_builder` from `run_id`/`step_id` and falls back to the run root span. When the metadata has
 no `run_id`, the call passes straight through; observability never blocks a call. A model error is
@@ -224,7 +244,49 @@ retries, and backpressure for spans and scores are already provided by `Batching
 custom event destination, implement Core `EventPublisher.publish(event)` directly and manage a
 bounded queue and shutdown procedure inside that implementation.
 
-This package currently targets Core `LoopEvent`. TeamLoop events have a different data structure
-and require a dedicated adapter; a team event publisher cannot be passed directly to these
-handlers. See the [Enterprise Integration Guide](../docs/enterprise-integration.en.md) for
-production topology and shutdown order.
+## TeamLoop and child-Agent spans
+
+When a `LoopAgentEndpoint` uses the `worker_runtime` created by
+`build_production_runtime(..., trace_exporter=OtelExporter(...))`, Team tracing loads automatically;
+no second event subscription or `task_middleware` configuration is required. The Runtime reuses the
+same `TracerProvider` and creates `matterloop.team -> matterloop.team.agent -> matterloop.run`,
+followed by the child Loop's phase/generation/tool spans.
+
+```python
+from matterloop_agents.collaboration import LoopAgentEndpoint, TeamOrchestratorComponents
+
+directory.register(LoopAgentEndpoint(agent_spec, production_runtime.worker_runtime))
+
+components = TeamOrchestratorComponents(
+    # planner, agents, selection_policy, verifier, approval_gate, repository, aggregator ...
+    events=team_events,
+)
+```
+
+Discovery occurs when `TeamOrchestrator` is constructed, so register Endpoints first. Child Runtimes
+should share the application's Provider. If several Providers are present, the controller
+deterministically selects the first by `agent_id` for Team/Agent spans; other remote child Runtimes
+still restore the W3C parent. A custom Runtime that does not expose this capability can still use
+`OpenTelemetryTeamTracePublisher` and `OpenTelemetryTeamTaskMiddleware` explicitly. An explicit
+`task_middleware` overrides automatic configuration and prevents duplicate spans. In that case, pass
+the same `OpenTelemetryTeamTracePublisher` as `snapshot_preparer` so the Team root Span's W3C carrier
+is saved in the same CAS as the Team snapshot.
+
+The Team event publisher never leaves its root Span attached to an event-publishing task. Each child
+Agent Span restores its parent explicitly from the snapshot carrier, so timeout-created tasks,
+cancellation shields, and remote execution never detach a ContextVar token from another task. A
+pause or block saves the carrier before ending the current Team segment; resume in another process
+creates a real child segment from that carrier and stays in the same Trace.
+
+Team spans retain only `team_run_id`, status, stop reason, task/agent/attempt, and task outcome.
+They do not write the Team goal, task description, outputs, human feedback, exception messages, or
+arbitrary metadata. The middleware propagates only W3C `traceparent`/`tracestate`, never baggage.
+`LoopAgentEndpoint` places the carrier in `LoopRequest.metadata["propagation_context"]`; in-process
+asyncio calls inherit the context automatically, while a remote runtime must forward that metadata
+unchanged and use `OpenTelemetryTracePublisher` in its child Loop to restore the real parent.
+
+`AsyncTeamRuntime.aclose()` rejects new Team operations and drains in-flight `run`, `resume`, and
+human-response work before closing resources. Therefore, when its `resources` own the child runtime
+and exporter, the Provider cannot flush or shut down before child-Agent spans end. See the
+[Enterprise Integration Guide](../docs/enterprise-integration.en.md) for production topology and
+shutdown order.

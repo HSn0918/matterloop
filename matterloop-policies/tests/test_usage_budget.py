@@ -430,6 +430,9 @@ class _AgentContext:
 class _Agent:
     spec = "agent-spec"
 
+    def __init__(self) -> None:
+        self.team_instrumentation = object()
+
     async def execute(self, context: _AgentContext) -> str:
         del context
         return "ok"
@@ -442,7 +445,8 @@ def test_structural_wrappers_enforce_tool_executor_and_agent_dimensions() -> Non
         ledger = UsageLedger(BudgetLimits(max_tool_calls=1, max_attempts=1, max_agent_tasks=1))
         tool = BudgetedTool(_Tool(), ledger)
         executor = BudgetedExecutor(_Executor(), ledger)
-        agent = BudgetedAgentEndpoint(_Agent(), ledger)
+        raw_agent = _Agent()
+        agent = BudgetedAgentEndpoint(raw_agent, ledger)
         tool_context = ToolContext("run")
         loop_context = LoopContext(LoopRequest("预算测试"), run_id="run")
         agent_context = _AgentContext("run")
@@ -450,6 +454,7 @@ def test_structural_wrappers_enforce_tool_executor_and_agent_dimensions() -> Non
         assert (await tool.invoke({}, tool_context)).content == "ok"
         assert (await executor.execute(PlanStep("执行"), loop_context)).output == "ok"
         assert await agent.execute(agent_context) == "ok"
+        assert agent.team_instrumentation is raw_agent.team_instrumentation
         with pytest.raises(ResourceLimitExceededError):
             await tool.invoke({}, tool_context)
         with pytest.raises(ResourceLimitExceededError):

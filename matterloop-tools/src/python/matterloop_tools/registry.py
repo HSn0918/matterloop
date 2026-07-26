@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable, Mapping, Sequence
 from math import isfinite
 from types import MappingProxyType
@@ -9,17 +10,20 @@ from types import MappingProxyType
 from matterloop_runtime import (
     ComponentExistsError,
     ComponentNotFoundError,
+    RuntimeClosedError,
     RuntimeContainer,
 )
 
 from matterloop_tools.base import (
     AllowAllToolAuthorizer,
+    PassthroughToolInvocationMiddleware,
     PermissionDecision,
     Tool,
     ToolAccessScope,
     ToolAuthorizer,
     ToolContext,
     ToolEffect,
+    ToolInvocationMiddleware,
     ToolResult,
     ToolSpec,
 )
@@ -38,6 +42,7 @@ class ToolRegistry:
     Args:
         tools: 无需异步启动的初始工具。
         authorizer: 每次调用前执行的授权器；默认显式放行。
+        middleware: 包裹工具查找、授权和执行的中立中间件；默认直接透传。
     """
 
     def __init__(
@@ -45,6 +50,7 @@ class ToolRegistry:
         tools: Iterable[Tool] = (),
         *,
         authorizer: ToolAuthorizer | None = None,
+        middleware: ToolInvocationMiddleware | None = None,
     ) -> None:
         initial: dict[str, Tool] = {}
         for tool in tools:
@@ -53,6 +59,12 @@ class ToolRegistry:
             initial[tool.spec.name] = tool
         self._components: RuntimeContainer[Tool] = RuntimeContainer(initial)
         self._authorizer = authorizer or AllowAllToolAuthorizer()
+        self._middleware = middleware or PassthroughToolInvocationMiddleware()
+        self._invocation_lock = asyncio.Lock()
+        self._active_invocations = 0
+        self._invocations_drained = asyncio.Event()
+        self._invocations_drained.set()
+        self._closing = False
 
     async def register(self, tool: Tool, *, replace: bool = False) -> None:
         """注册工具，并在允许时安全替换同名实例。
@@ -125,31 +137,57 @@ class ToolRegistry:
             ToolPermissionDeniedError: 只读边界或授权器拒绝调用。
             ToolNotFoundError: 工具不存在。
         """
-        stable_arguments = _freeze_arguments(arguments)
+        await self._begin_invocation()
         try:
-            async with self._components.acquire(name) as tool:
-                effect = tool.spec.effect_for(stable_arguments)
-                if (
-                    context.access_scope is ToolAccessScope.READ_ONLY
-                    and effect is not ToolEffect.READ
-                ):
-                    # 强制只读边界先于可插拔授权器执行，未知副作用也按拒绝处理。
-                    raise ToolPermissionDeniedError(name)
-                # 租约覆盖授权与执行，避免同名工具在授权后被替换成不同实现。
-                decision = await self._authorizer.authorize(
-                    name,
-                    _thaw_arguments(stable_arguments),
-                    context,
-                )
-                if decision is not PermissionDecision.ALLOW:
-                    raise ToolPermissionDeniedError(name)
-                return await tool.invoke(_thaw_arguments(stable_arguments), context)
-        except ComponentNotFoundError as exc:
-            raise ToolNotFoundError(name) from exc
+            stable_arguments = _freeze_arguments(arguments)
+
+            async def call_next() -> ToolResult:
+                try:
+                    async with self._components.acquire(name) as tool:
+                        effect = tool.spec.effect_for(stable_arguments)
+                        if (
+                            context.access_scope is ToolAccessScope.READ_ONLY
+                            and effect is not ToolEffect.READ
+                        ):
+                            # 强制只读边界先于可插拔授权器执行，未知副作用也按拒绝处理。
+                            raise ToolPermissionDeniedError(name)
+                        # 租约覆盖授权与执行，避免同名工具在授权后被替换成不同实现。
+                        decision = await self._authorizer.authorize(
+                            name,
+                            _thaw_arguments(stable_arguments),
+                            context,
+                        )
+                        if decision is not PermissionDecision.ALLOW:
+                            raise ToolPermissionDeniedError(name)
+                        return await tool.invoke(_thaw_arguments(stable_arguments), context)
+                except ComponentNotFoundError as exc:
+                    raise ToolNotFoundError(name) from exc
+
+            return await self._middleware.invoke(name, stable_arguments, context, call_next)
+        finally:
+            await self._end_invocation()
 
     async def aclose(self) -> None:
-        """关闭注册表并释放所有空闲工具。"""
+        """拒绝新调用，等待在途调用及其 Span 结束后关闭工具。"""
+        async with self._invocation_lock:
+            self._closing = True
+        await self._invocations_drained.wait()
         await self._components.aclose()
+
+    async def _begin_invocation(self) -> None:
+        """在关闭开始前登记一次完整的中间件包裹调用。"""
+        async with self._invocation_lock:
+            if self._closing:
+                raise RuntimeClosedError("tool registry is closing")
+            self._active_invocations += 1
+            self._invocations_drained.clear()
+
+    async def _end_invocation(self) -> None:
+        """在工具 Span 已结束后解除调用登记并唤醒关闭者。"""
+        async with self._invocation_lock:
+            self._active_invocations -= 1
+            if self._active_invocations == 0:
+                self._invocations_drained.set()
 
 
 def _freeze_arguments(arguments: Mapping[str, object]) -> Mapping[str, object]:

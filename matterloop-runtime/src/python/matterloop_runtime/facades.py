@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import threading
 from collections.abc import Coroutine, Iterable
 from concurrent.futures import Future
@@ -14,6 +15,7 @@ from matterloop_core import HumanResponse, LoopRequest, LoopResult, ResumeMode
 from matterloop_runtime.errors import RuntimeClosedError
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 class LoopEngine(Protocol):
@@ -74,6 +76,11 @@ class AsyncRuntime:
         self._engine = engine
         self._resources = tuple(resources)
         self._closed = False
+        self._operation_lock = asyncio.Lock()
+        self._active_operations = 0
+        self._operations_drained = asyncio.Event()
+        self._operations_drained.set()
+        self._close_task: asyncio.Task[None] | None = None
 
     def create_run_id(self) -> str:
         """预先创建运行标识，便于调用方并发取消。
@@ -94,8 +101,11 @@ class AsyncRuntime:
         Returns:
             Loop 运行结果。
         """
-        self._ensure_open()
-        return await self._engine.run(request, run_id=run_id)
+        await self._begin_operation()
+        try:
+            return await self._engine.run(request, run_id=run_id)
+        finally:
+            await self._end_operation()
 
     async def resume(
         self,
@@ -112,8 +122,11 @@ class AsyncRuntime:
         Returns:
             恢复后的运行结果。
         """
-        self._ensure_open()
-        return await self._engine.resume(run_id, mode=mode)
+        await self._begin_operation()
+        try:
+            return await self._engine.resume(run_id, mode=mode)
+        finally:
+            await self._end_operation()
 
     async def submit_human_response(
         self,
@@ -129,8 +142,11 @@ class AsyncRuntime:
         Returns:
             反馈已持久化但仍未自动恢复的 Loop 结果。
         """
-        self._ensure_open()
-        return await self._engine.submit_human_response(run_id, response)
+        await self._begin_operation()
+        try:
+            return await self._engine.submit_human_response(run_id, response)
+        finally:
+            await self._end_operation()
 
     async def cancel(self, run_id: str) -> bool:
         """请求取消一次 Loop。
@@ -148,10 +164,19 @@ class AsyncRuntime:
         return result
 
     async def aclose(self) -> None:
-        """按注册逆序关闭装配到运行时的资源；可重复调用。"""
-        if self._closed:
-            return
-        self._closed = True
+        """拒绝新运行，drain 在途操作后按逆序关闭资源；可并发、可重复调用。"""
+        async with self._operation_lock:
+            if self._close_task is None:
+                self._closed = True
+                self._close_task = asyncio.create_task(self._close_resources())
+                self._close_task.add_done_callback(self._consume_close_exception)
+            close_task = self._close_task
+        # 调用方取消只取消自己的等待；唯一关闭任务继续 drain 并释放全部资源。
+        await asyncio.shield(close_task)
+
+    async def _close_resources(self) -> None:
+        """独立于任一调用方 Task 完成 drain 与资源关闭。"""
+        await self._operations_drained.wait()
         first_error: Exception | None = None
         for resource in reversed(self._resources):
             try:
@@ -162,6 +187,13 @@ class AsyncRuntime:
         if first_error is not None:
             raise first_error
 
+    @staticmethod
+    def _consume_close_exception(task: asyncio.Task[None]) -> None:
+        """避免所有等待方均被取消时产生未获取的后台 Task 异常告警。"""
+        if task.cancelled():
+            return
+        task.exception()
+
     async def __aenter__(self) -> AsyncRuntime:
         """返回当前异步运行时。"""
         self._ensure_open()
@@ -169,11 +201,31 @@ class AsyncRuntime:
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
         """离开异步上下文时关闭资源。"""
-        await self.aclose()
+        try:
+            await self.aclose()
+        except Exception:
+            if exc is None:
+                raise
+            logger.exception("AsyncRuntime close failed while preserving the active exception")
 
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeClosedError("async runtime is closed")
+
+    async def _begin_operation(self) -> None:
+        """在关闭开始前登记一次可能使用模型、工具和 exporter 的操作。"""
+        async with self._operation_lock:
+            if self._closed:
+                raise RuntimeClosedError("async runtime is closed")
+            self._active_operations += 1
+            self._operations_drained.clear()
+
+    async def _end_operation(self) -> None:
+        """在运行完成后解除登记，允许关闭流程释放基础设施资源。"""
+        async with self._operation_lock:
+            self._active_operations -= 1
+            if self._active_operations == 0:
+                self._operations_drained.set()
 
 
 class LocalRuntime:

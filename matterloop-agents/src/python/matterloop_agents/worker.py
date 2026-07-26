@@ -121,7 +121,11 @@ class ToolCallingWorker:
                         context=ToolContext(
                             run_id=context.run_id,
                             step_id=step.step_id,
-                            metadata={"goal": context.request.goal},
+                            metadata={
+                                "goal": context.request.goal,
+                                "tool_call_id": call.call_id,
+                                "executor": step.executor,
+                            },
                             access_scope=self._tool_access_scope(context),
                         ),
                     )

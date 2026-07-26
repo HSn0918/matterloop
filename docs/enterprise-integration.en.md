@@ -218,11 +218,11 @@ The application should configure OpenTelemetry Providers, Exporters, sampling, a
 attributes centrally. When database, HTTP, or message-client auto-instrumentation is also enabled,
 create one shared `TracerProvider`, register it with `trace.set_tracer_provider(provider)`, then
 pass it to the production preset through `OtelExporter(tracer_provider=provider)`. MatterLoop runs,
-model generations, and database/HTTP spans will then be in one live trace. Do not use the internal
-Provider created by `OtelExporter(endpoint=...)` for cross-component tracing. Shut down in this
-order: `runtime.aclose()`, `provider.force_flush()`, then `provider.shutdown()`. Team events carry
-a complete Snapshot; evaluate their size, cardinality, and sensitive fields before writing them to a
-SIEM or Trace.
+model generations, tool calls, and database/HTTP spans will then be in one live trace. Do not use
+the internal Provider created by `OtelExporter(endpoint=...)` for cross-component tracing.
+`runtime.aclose()` closes tools and models before force-flushing the shared Provider; the
+application then calls `provider.shutdown()`. Team events carry a complete Snapshot; evaluate their
+size, cardinality, and sensitive fields before writing them to a SIEM or Trace.
 
 For offline tree-shaped traces, use `TraceBuilder` with `BatchingPipeline` to rebuild the event
 stream into a span tree and extract verification scores, and wrap model clients in

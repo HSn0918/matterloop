@@ -20,6 +20,12 @@
   Span 上下文，`OpenTelemetryModelClient` 嵌套记录 generation，数据库/HTTP 自动
   instrumentation 可进入同一条 Trace；阻塞/暂停时将 W3C `traceparent`/`tracestate` 与 checkpoint
   同次 CAS 保存，恢复后创建真实子 Span，`run_id` 仅用于业务关联。
+- Observability 新增 `OpenTelemetryToolMiddleware`，自动记录 Tool、Skill 和 MCP 调用；默认只记录
+  载荷大小、SHA-256 和白名单语义属性。只有显式设置 `capture_tool_payloads=True` 才按原文采集有界
+  载荷（默认 4096 字节，可通过 `capture_max_body_bytes` 覆盖）。production preset 支持显式
+  `tools`/`tool_authorizer` 注入。
+- Observability 新增 Team/子 Agent 实时 OTel 拓扑；Team 快照持久化 W3C carrier，暂停、阻塞和
+  跨进程恢复仍保持 `matterloop.team -> matterloop.team.agent -> matterloop.run` 父子关系。
 - Core 新增 `CheckpointPreparer` 协议与 `LoopContext.propagation_context` 字段：事件发布器可在
   checkpoint CAS 保存前写入可持久化的关联信息（如 W3C 传播上下文），`CompositeEventPublisher`
   会转发该钩子。
@@ -28,6 +34,11 @@
 
 - Checkpoint 当前结构新增 `propagation_context`，不再携带 `schema_version`；Codec 只接受顶层为
   `context` 的完整结构。
+- Trace Span 名称统一为固定的 `matterloop.*` 语义，动态 agent/executor 信息改为属性；
+  `OtelExporter.aclose()` 会 force-flush，并只 shutdown 自己创建的 Provider。
+  这是观测 schema 的不兼容变更；现有 dashboard、告警和查询必须迁移到新的固定 Span 名称。
+- Runtime 关闭会先 drain 在途 Loop 和工具调用，再关闭工具、模型与 exporter，避免已结束 Provider
+  漏掉晚结束的 `matterloop.tool` Span。
 
 ### Deprecated
 
