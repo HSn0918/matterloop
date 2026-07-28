@@ -125,8 +125,11 @@ class AsyncTeamRuntime:
         Returns:
             控制器是否接受新的取消请求。
         """
-        self._ensure_open()
-        return await self._orchestrator.cancel(run_id)
+        await self._begin_operation()
+        try:
+            return await self._orchestrator.cancel(run_id)
+        finally:
+            await self._end_operation()
 
     async def get(self, run_id: str) -> TeamResult:
         """读取团队运行结果。
@@ -137,13 +140,19 @@ class AsyncTeamRuntime:
         Returns:
             最新持久化结果。
         """
-        self._ensure_open()
-        return await self._orchestrator.get(run_id)
+        await self._begin_operation()
+        try:
+            return await self._orchestrator.get(run_id)
+        finally:
+            await self._end_operation()
 
     async def list(self) -> tuple[TeamSnapshot, ...]:
         """列出全部团队运行快照。"""
-        self._ensure_open()
-        return await self._orchestrator.list()
+        await self._begin_operation()
+        try:
+            return await self._orchestrator.list()
+        finally:
+            await self._end_operation()
 
     async def aclose(self) -> None:
         """拒绝新操作，drain 在途 Team 调用后按逆序关闭资源；可并发、可重复调用。"""

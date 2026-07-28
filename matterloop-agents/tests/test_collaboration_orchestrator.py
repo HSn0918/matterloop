@@ -207,6 +207,26 @@ def test_w3c_propagation_context_accepts_empty_tracestate() -> None:
     assert snapshot.propagation_context["tracestate"] == ""
 
 
+@pytest.mark.parametrize(
+    "carrier",
+    (
+        {"authorization": "must-not-propagate"},
+        {"Traceparent": "00-" + "a" * 32 + "-" + "b" * 16 + "-01"},
+    ),
+)
+def test_w3c_propagation_context_rejects_non_standard_headers(
+    carrier: dict[str, str],
+) -> None:
+    """传播边界必须拒绝非标准或非规范大小写的 header。"""
+    request = TeamRequest("验证传播边界")
+    task = TaskSpec("task", "执行", "analysis")
+
+    with pytest.raises(ValueError, match="only traceparent/tracestate"):
+        AgentTaskContext("run", request, task, "worker", 1, propagation_context=carrier)
+    with pytest.raises(ValueError, match="only traceparent/tracestate"):
+        TeamSnapshot(request, (), run_id="run", propagation_context=carrier)
+
+
 async def test_async_team_runtime_drains_active_team_before_closing_resources() -> None:
     """关闭必须等待慢 Endpoint 及其中的 Span 结束，不能抢先关闭 exporter。"""
 
@@ -240,6 +260,61 @@ async def test_async_team_runtime_drains_active_team_before_closing_resources() 
     await asyncio.wait_for(closing, timeout=1)
 
     assert result.status is TeamStatus.COMPLETED
+    assert resource.closed is True
+
+
+@pytest.mark.parametrize("operation", ("cancel", "get", "list"))
+async def test_async_team_runtime_drains_non_run_operations_before_closing_resources(
+    operation: str,
+) -> None:
+    """cancel/get/list 也可能访问仓储或 exporter，关闭必须等待它们结束。"""
+
+    class ClosingResource:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class BlockingOrchestrator:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def _block(self) -> None:
+            self.started.set()
+            await self.release.wait()
+
+        async def cancel(self, run_id: str) -> bool:
+            del run_id
+            await self._block()
+            return True
+
+        async def get(self, run_id: str) -> object:
+            del run_id
+            await self._block()
+            return object()
+
+        async def list(self) -> tuple[()]:
+            await self._block()
+            return ()
+
+    orchestrator = BlockingOrchestrator()
+    resource = ClosingResource()
+    runtime = AsyncTeamRuntime(orchestrator, resources=(resource,))  # type: ignore[arg-type]
+    method = getattr(runtime, operation)
+    running = asyncio.create_task(method() if operation == "list" else method("run"))
+    await orchestrator.started.wait()
+    closing = asyncio.create_task(runtime.aclose())
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    assert not closing.done()
+    assert resource.closed is False
+
+    orchestrator.release.set()
+    await running
+    await closing
     assert resource.closed is True
 
 

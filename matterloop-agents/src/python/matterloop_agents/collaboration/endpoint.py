@@ -16,6 +16,8 @@ from matterloop_agents.collaboration.models import (
 )
 from matterloop_agents.collaboration.protocols import TeamInstrumentation
 
+_W3C_PROPAGATION_HEADERS = frozenset({"traceparent", "tracestate"})
+
 
 @runtime_checkable
 class LoopRuntime(Protocol):
@@ -100,7 +102,11 @@ class LoopAgentEndpoint:
                 "dependency_outputs": tuple(result.output for result in context.dependency_results),
                 # 仅携带标准 W3C traceparent/tracestate；由可选中间件注入，业务调用方不可
                 # 通过 TeamRequest/TaskSpec metadata 覆盖。远端 Loop 运行时应原样传递该字段。
-                "propagation_context": dict(context.propagation_context),
+                "propagation_context": {
+                    header: value
+                    for header, value in context.propagation_context.items()
+                    if header in _W3C_PROPAGATION_HEADERS
+                },
                 # 团队任务元数据不可信；该保留字段必须最后写入，调用方不能提升子 Agent 权限。
                 "tool_access_scope": ToolAccessScope.READ_ONLY.value,
             },

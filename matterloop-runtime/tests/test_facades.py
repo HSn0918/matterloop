@@ -120,6 +120,36 @@ async def test_async_runtime_close_waits_for_inflight_run_before_closing_resourc
     assert resource.closed
 
 
+async def test_async_runtime_close_waits_for_inflight_cancel_before_closing_resources() -> None:
+    """异步 cancel 也必须纳入运行时 drain，避免终态事件与 exporter 关闭竞态。"""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingCancelEngine(FakeLoopEngine):
+        async def cancel(self, run_id: str) -> bool:
+            self.cancelled.append(run_id)
+            started.set()
+            await release.wait()
+            return True
+
+    engine = BlockingCancelEngine()
+    resource = Resource()
+    runtime = AsyncRuntime(engine, resources=[resource])
+    cancelling = asyncio.create_task(runtime.cancel("in-flight"))
+    await started.wait()
+    closing = asyncio.create_task(runtime.aclose())
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    assert not closing.done()
+    assert not resource.closed
+
+    release.set()
+    assert await cancelling
+    await closing
+    assert resource.closed
+
+
 async def test_async_runtime_cancelled_close_waiter_does_not_abandon_resource_close() -> None:
     """取消首个 aclose 调用方只能取消等待，不能伪造关闭完成或遗留资源。"""
     close_started = asyncio.Event()

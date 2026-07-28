@@ -157,11 +157,14 @@ class AsyncRuntime:
         Returns:
             内核是否接受取消请求。
         """
-        self._ensure_open()
-        result = self._engine.cancel(run_id)
-        if inspect.isawaitable(result):
-            return bool(await result)
-        return result
+        await self._begin_operation()
+        try:
+            result = self._engine.cancel(run_id)
+            if inspect.isawaitable(result):
+                return bool(await result)
+            return result
+        finally:
+            await self._end_operation()
 
     async def aclose(self) -> None:
         """拒绝新运行，drain 在途操作后按逆序关闭资源；可并发、可重复调用。"""

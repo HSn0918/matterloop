@@ -18,6 +18,8 @@ from matterloop_core import (
 
 from matterloop_agents.collaboration._immutability import freeze_mapping
 
+_W3C_PROPAGATION_HEADERS = frozenset({"traceparent", "tracestate"})
+
 
 def _validate_text(value: str, field_name: str) -> None:
     """校验稳定标识和面向 Agent 的文本。"""
@@ -33,14 +35,13 @@ def _freeze_metadata(value: Mapping[str, object]) -> Mapping[str, object]:
 def _freeze_propagation_context(value: Mapping[str, str]) -> Mapping[str, str]:
     """校验并冻结 W3C 传播载体；空 ``tracestate`` 是合法值。"""
     if any(
-        not isinstance(header, str)
-        or not header
+        header not in _W3C_PROPAGATION_HEADERS
         or not isinstance(item, str)
-        or (not item and header.lower() != "tracestate")
+        or (header == "traceparent" and not item)
         for header, item in value.items()
     ):
         raise ValueError(
-            "propagation_context must contain non-empty string headers and string values"
+            "propagation_context must contain only traceparent/tracestate string values"
         )
     return MappingProxyType(dict(value))
 
