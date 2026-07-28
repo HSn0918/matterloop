@@ -9,6 +9,7 @@ from hashlib import sha256
 
 import pytest
 from matterloop_agents.collaboration.artifacts import ArtifactStore, InMemoryArtifactStore
+from matterloop_agents.collaboration.context import ContextAwareTeamRepository
 from matterloop_agents.collaboration.errors import (
     ArtifactNotFoundError,
     TeamRunAlreadyExistsError,
@@ -29,6 +30,21 @@ from matterloop_agents.collaboration.models import (
     TeamStatus,
 )
 from matterloop_agents.collaboration.stores import InMemoryTeamRepository
+from matterloop_models import (
+    MessageRole,
+    ModelCapabilities,
+    ModelContextScope,
+    ModelDescriptor,
+    ModelFeature,
+    ModelMessage,
+    ModelRequest,
+)
+from matterloop_runtime import (
+    ContextLifecycleManager,
+    ContextPolicy,
+    InMemoryContextBlobStore,
+    InMemoryContextStore,
+)
 
 
 def _snapshot(
@@ -163,6 +179,45 @@ async def test_team_repository_coordinates_cross_orchestrator_leases() -> None:
     assert await repository.acquire_lease("run-1", "owner-b") is False
     await repository.release_lease("run-1", "owner-a")
     assert await repository.acquire_lease("run-1", "owner-b") is True
+
+
+async def test_context_aware_team_repository_saves_exact_model_revision() -> None:
+    """团队 CAS 快照必须携带同一运行已提交的模型 Context 精确引用。"""
+
+    class Model:
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor(
+                provider="test",
+                model="test",
+                capabilities=ModelCapabilities(supported=frozenset({ModelFeature.TEXT_GENERATION})),
+                context_window_tokens=10_000,
+            )
+
+        async def generate(self, request: ModelRequest):
+            raise AssertionError(request)
+
+    manager = ContextLifecycleManager(
+        ContextPolicy(max_context_tokens=10_000, reserved_output_tokens=10),
+        InMemoryContextStore(),
+        InMemoryContextBlobStore(),
+    )
+    await manager.prepare(
+        ModelRequest(
+            messages=(ModelMessage(MessageRole.USER, "goal"),),
+            context_scope=ModelContextScope("team-context", "team_planner"),
+        ),
+        Model(),
+    )
+    repository = ContextAwareTeamRepository(InMemoryTeamRepository(), manager)
+
+    await repository.create(_snapshot("team-context"))
+    loaded = await repository.load("team-context")
+
+    assert loaded is not None
+    assert len(loaded.external_state_refs) == 1
+    assert loaded.external_state_refs[0].kind == "model_context"
+    assert loaded.external_state_refs[0].revision == 1
 
 
 async def test_nested_metadata_is_frozen_before_repository_storage() -> None:

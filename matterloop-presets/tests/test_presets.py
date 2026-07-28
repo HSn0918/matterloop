@@ -32,9 +32,11 @@ from matterloop_observability import OtelExporter, Score, SpanRecord
 from matterloop_observability.pipeline import ExportItem
 from matterloop_presets import (
     CodingPresetConfig,
+    ContextRuntimeConfig,
     MinimalPresetConfig,
     PresetConfigurationError,
     ProductionLocalRuntime,
+    ProductionPresetConfig,
     ResearchPresetConfig,
     build_coding_local_runtime,
     build_coding_runtime,
@@ -45,7 +47,17 @@ from matterloop_presets import (
     build_research_local_runtime,
     build_research_runtime,
 )
-from matterloop_runtime import InMemoryQueueBackend, InMemoryRunRepository, LocalRuntime, RunStatus
+from matterloop_runtime import (
+    ContextPolicy,
+    ContextRetentionPolicy,
+    InMemoryContextBlobStore,
+    InMemoryContextStore,
+    InMemoryQueueBackend,
+    InMemoryRunRepository,
+    LocalContextEventPublisher,
+    LocalRuntime,
+    RunStatus,
+)
 from matterloop_tools import ToolContext, ToolPermissionDeniedError
 
 
@@ -345,6 +357,38 @@ def test_production_runtime_requires_and_uses_explicit_infrastructure() -> None:
 
     with pytest.raises(PresetConfigurationError, match="queue_backend"):
         build_production_runtime(FakeModelClient())
+
+    base_context = {
+        "policy": ContextPolicy(max_context_tokens=10_000),
+        "store": InMemoryContextStore(),
+        "blob_store": InMemoryContextBlobStore(),
+        "events": LocalContextEventPublisher(),
+    }
+    infrastructure = {
+        "queue_backend": InMemoryQueueBackend(),
+        "run_repository": InMemoryRunRepository(),
+        "checkpoint_store": InMemoryCheckpointStore(),
+        "audit_publisher": AuditPublisher(),
+    }
+    with pytest.raises(PresetConfigurationError, match="retention policy"):
+        build_production_runtime(
+            FakeModelClient(),
+            config=ProductionPresetConfig(
+                context=ContextRuntimeConfig(**base_context),
+            ),
+            **infrastructure,
+        )
+    with pytest.raises(PresetConfigurationError, match="semantic compactor"):
+        build_production_runtime(
+            FakeModelClient(),
+            config=ProductionPresetConfig(
+                context=ContextRuntimeConfig(
+                    **base_context,
+                    retention=ContextRetentionPolicy(60, 60, 60),
+                ),
+            ),
+            **infrastructure,
+        )
 
     async def scenario() -> None:
         queue = InMemoryQueueBackend()

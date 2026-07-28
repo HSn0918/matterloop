@@ -11,6 +11,7 @@ from matterloop_core.context.human import (
 from matterloop_core.context.models import (
     ArtifactRef,
     ExecutionResult,
+    ExternalStateRef,
     IterationRecord,
     LoopContext,
     LoopLimits,
@@ -25,6 +26,7 @@ from matterloop_core.context.models import (
 __all__ = [
     "ArtifactRef",
     "ExecutionResult",
+    "ExternalStateRef",
     "HumanAction",
     "HumanInteractionKind",
     "HumanInteractionRecord",

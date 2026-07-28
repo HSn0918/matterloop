@@ -167,8 +167,11 @@ class TeamOrchestrator:
         timeout = request.limits.timeout_seconds
         deadline = asyncio.get_running_loop().time() + timeout if timeout is not None else None
         started_at = datetime.now(timezone.utc)
+        request_metadata = dict(request.metadata)
+        request_metadata["_matterloop_team_run_id"] = resolved_run_id
+        runtime_request = replace(request, metadata=request_metadata)
         initial = TeamSnapshot(
-            request=request,
+            request=runtime_request,
             tasks=(),
             run_id=resolved_run_id,
             status=TeamStatus.PLANNING,

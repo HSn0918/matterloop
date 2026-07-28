@@ -7,7 +7,9 @@ from collections.abc import Mapping
 
 from matterloop_core import ExecutionResult, LoopContext, PlanStep
 from matterloop_models import (
+    ContextInputMode,
     MessageRole,
+    ModelContextScope,
     ModelMessage,
     ModelRegistry,
     ModelRequest,
@@ -17,6 +19,7 @@ from matterloop_models import (
 )
 from matterloop_tools import ToolAccessScope, ToolContext, ToolRegistry
 
+from matterloop_agents._parsing import context_tenant_id
 from matterloop_agents.config import ToolCallingWorkerConfig
 from matterloop_agents.errors import (
     AgentModelOutputError,
@@ -62,6 +65,13 @@ class ToolCallingWorker:
             AgentModelOutputError: 模型既没有工具调用也没有最终文本。
         """
         definitions = self._tool_definitions()
+        context_scope = ModelContextScope(
+            tenant_id=context_tenant_id(context.request.metadata),
+            run_id=context.run_id,
+            participant=f"worker:{step.executor}",
+            task_id=step.step_id,
+            invocation_id=f"attempt:{context.total_attempts + 1}",
+        )
         request = ModelRequest(
             messages=(
                 ModelMessage(
@@ -74,6 +84,8 @@ class ToolCallingWorker:
             tools=definitions,
             max_output_tokens=self._config.max_output_tokens,
             usage_scopes=self._usage_scopes(context),
+            context_scope=context_scope,
+            context_mode=ContextInputMode.REPLACE,
             metadata={"run_id": context.run_id, "step_id": step.step_id, "agent": "worker"},
         )
         total_usage = TokenUsage()
@@ -147,6 +159,8 @@ class ToolCallingWorker:
                     continuation=response.continuation,
                     max_output_tokens=self._config.max_output_tokens,
                     usage_scopes=self._usage_scopes(context),
+                    context_scope=context_scope,
+                    context_mode=ContextInputMode.APPEND,
                     metadata={
                         "run_id": context.run_id,
                         "step_id": step.step_id,

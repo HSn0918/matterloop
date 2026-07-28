@@ -69,13 +69,13 @@ logs, events, checkpoints, or databases.
 - `ToolDefinition(name, description, parameters, strict)`: a function tool definition visible to the model.
 - `ToolCall(call_id, name, arguments)` and `ToolOutput(call_id, output, is_error)`: a tool request and its local
   result.
-- `ModelRequest(messages, tools, tool_outputs, previous_response_id, response_schema, response_schema_name, max_output_tokens, temperature, tool_choice, continuation, usage_scopes, metadata)`: one generation request.
+- `ModelRequest(messages, input_items, tools, tool_outputs, previous_response_id, response_schema, response_schema_name, max_output_tokens, temperature, tool_choice, continuation, usage_scopes, context_scope, context_mode, metadata)`: one generation request; canonical input cannot be mixed with legacy conversation fields.
 - `TokenUsage(input_tokens, output_tokens, total_tokens, cache_hit_tokens, cache_miss_tokens, reasoning_tokens)`:
   provider-reported usage. Cache and reasoning values are details and must not be added to the total again.
-- `ModelResponse(output_text, tool_calls, usage, response_id, continuation, metadata)`: the normalized result.
+- `ModelResponse(output_text, tool_calls, output_items, usage, response_id, continuation, metadata)`: the normalized result.
 - `ModelCapabilities(supported, unsupported)`: a three-state capability set. Capabilities present in neither set are
   unknown.
-- `ModelDescriptor(provider, model, capabilities, metadata)`: a discoverable, non-sensitive model description in the
+- `ModelDescriptor(provider, model, capabilities, context_window_tokens, metadata)`: a discoverable, non-sensitive model description in the
   registry.
 - `ModelRequirements(required_features, provider, model, allow_unknown)`: routing preflight requirements; unknown
   capabilities are rejected by default.

@@ -10,11 +10,12 @@ assembles long-term memory and Workers.
 pip install matterloop-integration-redis
 ```
 
-## Four adapters with separate responsibilities
+## Five adapters with separate responsibilities
 
 | Adapter | Data stored | Key guarantee |
 | --- | --- | --- |
 | `RedisCheckpointStore` | Complete `LoopContext` checkpoints | Revision CAS; strict Core checkpoint schema |
+| `RedisContextStore` | Immutable compacted model-context versions | Latest-pointer CAS, explicit TTL, and exact-revision recovery |
 | `RedisQueueBackend` | Pending jobs, delayed jobs, leases, and cancellation markers | Atomic single-node state transitions in Lua; at-least-once delivery |
 | `RedisRunRepository` | `RunRecord` and creation-time index | Version CAS prevents concurrent overwrite |
 | `RedisEventPublisher` | One Core event Stream per run | Ordered cursor reads; approximate length trimming |
@@ -30,13 +31,20 @@ interchangeable.
 from matterloop_integration_redis import (
     RedisCheckpointStore,
     RedisConfig,
+    RedisContextStore,
     RedisEventPublisher,
     RedisQueueBackend,
     RedisRunRepository,
 )
+from matterloop_runtime import ContextRetentionPolicy
 
 config = RedisConfig(prefix="matterloop:{prod}", lease_seconds=300)
 checkpoints = RedisCheckpointStore(client=redis_client, config=config, codec=None)
+contexts = RedisContextStore(
+    redis_client,
+    ContextRetentionPolicy(86_400, 604_800, 604_800),
+    config,
+)
 queue = RedisQueueBackend(client=redis_client, config=config, codec=None)
 runs = RedisRunRepository(client=redis_client, config=config, codec=None)
 events = RedisEventPublisher(
@@ -47,7 +55,7 @@ events = RedisEventPublisher(
 ```
 
 The application creates `redis_client` and configures TLS, authentication, timeouts, and connection
-pooling. All four adapters may share the client, but none of them closes it.
+pooling. All five adapters may share the client, but none of them closes it.
 
 `RedisConfig(prefix, lease_seconds, event_max_length)` stores non-sensitive behavior configuration
 only. The defaults are `"matterloop"`, `60.0` seconds, and an approximate `10_000` events,

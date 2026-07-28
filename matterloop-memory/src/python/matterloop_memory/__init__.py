@@ -1,6 +1,7 @@
 """MatterLoop 记忆协议与内存实现公共 API。"""
 
 from matterloop_memory.base import MemoryKind, MemoryMatch, MemoryQuery, MemoryRecord, MemoryStore
+from matterloop_memory.context import MemoryContextSink
 from matterloop_memory.episodic import (
     EpisodeMatch,
     EpisodeRecord,
@@ -55,6 +56,7 @@ __all__ = [
     "KnowledgeGraph",
     "KnowledgeTriple",
     "MemoryKind",
+    "MemoryContextSink",
     "MemoryMatch",
     "MemoryQuery",
     "MemoryRecord",

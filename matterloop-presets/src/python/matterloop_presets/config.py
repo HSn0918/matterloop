@@ -7,6 +7,30 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from matterloop_policies import RetryConfig
+from matterloop_runtime import (
+    ContextBlobStore,
+    ContextCompactor,
+    ContextEventPublisher,
+    ContextMemorySink,
+    ContextPolicy,
+    ContextRetentionPolicy,
+    ContextStore,
+    MemoryAdmissionPolicy,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ContextRuntimeConfig:
+    """组合 Context Lifecycle Engine 所需的显式运行依赖。"""
+
+    policy: ContextPolicy
+    store: ContextStore
+    blob_store: ContextBlobStore
+    events: ContextEventPublisher
+    semantic_compactor: ContextCompactor | None = None
+    memory_sink: ContextMemorySink | None = None
+    memory_admission: MemoryAdmissionPolicy | None = None
+    retention: ContextRetentionPolicy | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +52,7 @@ class AgentPresetConfig:
     pass_score: float = 80
     max_identical_feedback: int = 2
     retry: RetryConfig = field(default_factory=RetryConfig)
+    context: ContextRuntimeConfig | None = None
 
     def __post_init__(self) -> None:
         """校验会影响模型选择和闭环收敛的配置。"""
@@ -134,6 +159,7 @@ class ProductionPresetConfig(AgentPresetConfig):
 __all__ = [
     "AgentPresetConfig",
     "CodingPresetConfig",
+    "ContextRuntimeConfig",
     "MinimalPresetConfig",
     "ProductionPresetConfig",
     "ResearchPresetConfig",

@@ -9,8 +9,10 @@ from types import SimpleNamespace
 import pytest
 from matterloop_models import (
     MessageRole,
+    ModelCompactionItem,
     ModelInvocationError,
     ModelMessage,
+    ModelMessageItem,
     ModelRequest,
     ToolDefinition,
     ToolOutput,
@@ -38,6 +40,46 @@ class FailingResponses:
         """模拟供应商调用失败。"""
         del kwargs
         raise RuntimeError("authorization sk-secret-value")
+
+
+class StubInputTokens:
+    """记录精确计数请求。"""
+
+    def __init__(self) -> None:
+        self.parameters: dict[str, object] = {}
+
+    async def count(self, **kwargs: object) -> object:
+        self.parameters = kwargs
+        return SimpleNamespace(input_tokens=37)
+
+
+class ContextResponses(StubResponses):
+    """同时模拟 create、input_tokens.count 和 compact。"""
+
+    def __init__(self) -> None:
+        super().__init__(SimpleNamespace(output_text="ok", output=[], usage=None))
+        self.input_tokens = StubInputTokens()
+        self.compact_parameters: dict[str, object] = {}
+
+    async def compact(self, **kwargs: object) -> object:
+        self.compact_parameters = kwargs
+        return SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    role="user",
+                    content=[{"type": "input_text", "text": "retained"}],
+                ),
+                SimpleNamespace(type="compaction", encrypted_content="encrypted-window"),
+            ]
+        )
+
+
+class ContextOpenAIClient:
+    """暴露完整上下文能力资源。"""
+
+    def __init__(self) -> None:
+        self.responses = ContextResponses()
 
 
 class StubOpenAIClient:
@@ -79,12 +121,13 @@ async def _structured_output_scenario() -> None:
         status="completed",
         output_text="",
         output=[
+            SimpleNamespace(type="reasoning", id="reasoning_1", summary=[]),
             SimpleNamespace(
                 type="function_call",
                 call_id="call_1",
                 name="lookup",
                 arguments='{"query":"matter"}',
-            )
+            ),
         ],
         usage=SimpleNamespace(input_tokens=12, output_tokens=4, total_tokens=16),
     )
@@ -118,6 +161,8 @@ async def _structured_output_scenario() -> None:
         }
     ]
     assert response.tool_calls[0].arguments == {"query": "matter"}
+    assert isinstance(response.output_items[0], ModelCompactionItem)
+    assert '"type":"reasoning"' in response.output_items[0].payload
     assert response.usage.total_tokens == 16
 
 
@@ -182,5 +227,38 @@ def test_openai_adapter_does_not_expose_supplier_error_text() -> None:
 
         assert "sk-secret-value" not in str(captured.value)
         assert captured.value.__suppress_context__
+
+    asyncio.run(scenario())
+
+
+def test_openai_adapter_counts_and_compacts_canonical_input() -> None:
+    async def scenario() -> None:
+        sdk_client = ContextOpenAIClient()
+        client = OpenAIModelClient(
+            OpenAIModelConfig(model="configured-model"),
+            client=sdk_client,
+        )
+        request = ModelRequest(input_items=(ModelMessageItem(MessageRole.USER, "hello"),))
+
+        assert await client.count_input_tokens(request) == 37
+        compacted = await client.compact_input(request)
+
+        assert len(compacted) == 2
+        assert isinstance(compacted[0], ModelCompactionItem)
+        assert '"type":"message"' in compacted[0].payload
+        assert compacted[0].provider == "openai"
+        follow_up = ModelRequest(input_items=compacted)
+        await client.generate(follow_up)
+        assert sdk_client.responses.parameters["input"] == [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "retained"}],
+            },
+            {"type": "compaction", "encrypted_content": "encrypted-window"},
+        ]
+        assert sdk_client.responses.compact_parameters["input"] == [
+            {"role": "user", "content": "hello"}
+        ]
 
     asyncio.run(scenario())

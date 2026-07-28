@@ -214,7 +214,7 @@ occurred.
 - `TeamReviewContext(run_id, request, cycle, plan_revision, task_results, draft_output, prior_reviews, human_feedback)`.
 - `TeamReview(action, feedback, score, evidence, failed_criteria, interaction)`.
 - `TeamCycleRecord(cycle, plan_revision, tasks, draft_output, review, error)`.
-- `TeamSnapshot(request, tasks, run_id, status, version, stop_reason, output, error, cycle, plan_revision, cycle_history, pending_interaction, pending_review, human_interactions, review_approved_cycle, active_elapsed_seconds, active_started_at, created_at, updated_at)`.
+- `TeamSnapshot(request, tasks, run_id, status, version, stop_reason, output, error, cycle, plan_revision, cycle_history, pending_interaction, pending_review, human_interactions, external_state_refs, review_approved_cycle, active_elapsed_seconds, active_started_at, created_at, updated_at)`.
 - `TeamResult(run_id, status, task_results, output, stop_reason, error, cycle, cycle_history, pending_interaction, human_interactions, started_at, finished_at)`.
 - `TeamEvent(event_type, snapshot, detail, metadata, occurred_at)`: the event carries the complete Snapshot at that point and may be large and sensitive.
 - `AgentMessage(team_run_id, sender_agent_id, recipient_agent_id, message_type, content, correlation_id, metadata, message_id, created_at)`: optional Mailbox DTO; it is not a global-state channel.

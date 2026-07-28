@@ -36,7 +36,12 @@ from matterloop_policies import (
     NoProgressStopPolicy,
     StopConfig,
 )
-from matterloop_runtime import AsyncClosable
+from matterloop_runtime import (
+    AsyncClosable,
+    ContextCheckpointEventPublisher,
+    ContextLifecycleManager,
+    ContextManagedModelClient,
+)
 from matterloop_tools import ToolRegistry
 
 from matterloop_presets.config import AgentPresetConfig
@@ -105,8 +110,40 @@ def _assemble_runtime(
     extra_resources: tuple[AsyncClosable, ...] = (),
 ) -> PresetRuntime:
     """把稳定组件协议装配为一个异步运行门面。"""
+    actual_model = model
+    actual_events = events
+    if config.context is not None:
+        primary_descriptor = getattr(model, "descriptor", None)
+        primary_provider = getattr(primary_descriptor, "provider", None)
+        summary_provider = getattr(
+            config.context.semantic_compactor,
+            "provider",
+            None,
+        )
+        if (
+            not config.context.policy.allow_cross_provider_summary
+            and isinstance(primary_provider, str)
+            and isinstance(summary_provider, str)
+            and primary_provider != summary_provider
+        ):
+            raise PresetConfigurationError(
+                "context semantic compactor provider differs from the primary model; "
+                "set allow_cross_provider_summary=True to opt in"
+            )
+        context_manager = ContextLifecycleManager(
+            config.context.policy,
+            config.context.store,
+            config.context.blob_store,
+            semantic_compactor=config.context.semantic_compactor,
+            events=config.context.events,
+            memory_sink=config.context.memory_sink,
+            memory_admission=config.context.memory_admission,
+            retention=config.context.retention,
+        )
+        actual_model = ContextManagedModelClient(model, context_manager)
+        actual_events = ContextCheckpointEventPublisher(events, context_manager)
     models = ModelRegistry()
-    models.register(config.model_name, model)
+    models.register(config.model_name, actual_model)
 
     planner: Planner = ModelPlanner(
         models,
@@ -156,13 +193,13 @@ def _assemble_runtime(
         verifiers=verifiers,
         checkpoint_store=checkpoint_store,
         policy=CompositeLoopPolicy(NoProgressStopPolicy(StopConfig(config.max_identical_feedback))),
-        events=events,
+        events=actual_events,
         approval_gate=approval_gate,
         retry_policy=ExponentialBackoffRetryPolicy(config.retry),
     )
     resources: list[AsyncClosable] = []
-    if callable(getattr(model, "aclose", None)):
-        resources.append(cast(AsyncClosable, model))
+    if callable(getattr(actual_model, "aclose", None)):
+        resources.append(cast(AsyncClosable, actual_model))
     resources.extend(tool_registries.values())
     resources.extend(extra_resources)
     return PresetRuntime(

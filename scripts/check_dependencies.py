@@ -35,12 +35,18 @@ PACKAGE_ROOTS: dict[str, str] = {
 ALLOWED: dict[str, frozenset[str]] = {
     "matterloop_core": frozenset(),
     "matterloop_models": frozenset(),
-    "matterloop_runtime": frozenset({"matterloop_core"}),
+    "matterloop_runtime": frozenset({"matterloop_core", "matterloop_models"}),
     "matterloop_tools": frozenset({"matterloop_runtime"}),
-    "matterloop_memory": frozenset({"matterloop_core"}),
+    "matterloop_memory": frozenset({"matterloop_core", "matterloop_models"}),
     "matterloop_policies": frozenset({"matterloop_core", "matterloop_models", "matterloop_tools"}),
     "matterloop_agents": frozenset(
-        {"matterloop_core", "matterloop_models", "matterloop_tools", "matterloop_memory"}
+        {
+            "matterloop_core",
+            "matterloop_models",
+            "matterloop_runtime",
+            "matterloop_tools",
+            "matterloop_memory",
+        }
     ),
     "matterloop_observability": frozenset({"matterloop_core"}),
     "matterloop_presets": frozenset(

@@ -9,6 +9,12 @@ from typing import cast
 from matterloop_agents.errors import AgentModelOutputError
 
 
+def context_tenant_id(metadata: Mapping[str, object]) -> str:
+    """从 Loop 请求元数据读取稳定租户；非法值安全回退到默认租户。"""
+    value = metadata.get("tenant_id", "default")
+    return value.strip() if isinstance(value, str) and value.strip() else "default"
+
+
 def parse_json_object(text: str, *, purpose: str) -> Mapping[str, object]:
     """把模型文本解析成字符串键 JSON 对象。
 

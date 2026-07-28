@@ -121,9 +121,9 @@ By default no tracing resources are created and the event pipeline behaves exact
 
 All configuration types are frozen dataclasses:
 
-- `AgentPresetConfig(model_name, max_plan_steps, max_tool_rounds, pass_score, max_identical_feedback, retry)`
-  defaults to `"default"`, `20`, `8`, `80`, `2`, and the default retry configuration,
-  respectively.
+- `AgentPresetConfig(model_name, max_plan_steps, max_tool_rounds, pass_score, max_identical_feedback, retry, context)`
+  defaults to `"default"`, `20`, `8`, `80`, `2`, the default retry configuration, and disabled
+  Context Lifecycle, respectively.
 - `MinimalPresetConfig` and `ProductionPresetConfig` currently add no fields.
 - `CodingPresetConfig` adds `privileged_executor`, `allowed_commands`, `shell_environment`,
   `max_read_bytes`, `max_write_bytes`, `max_shell_timeout_seconds`, and

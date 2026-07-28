@@ -62,6 +62,25 @@ class TracedModelClient:
         if callable(aclose):
             await aclose()
 
+    @property
+    def descriptor(self) -> Any:
+        """透传底层模型描述，供能力协商和上下文预算使用。"""
+        return getattr(self._client, "descriptor", None)
+
+    async def count_input_tokens(self, request: Any) -> int:
+        """透传可选的精确 Token 计数能力。"""
+        counter = getattr(self._client, "count_input_tokens", None)
+        if not callable(counter):
+            raise NotImplementedError("wrapped model does not support exact token counting")
+        return int(await counter(request))
+
+    async def compact_input(self, request: Any) -> Any:
+        """透传可选的供应商原生压缩能力。"""
+        compactor = getattr(self._client, "compact_input", None)
+        if not callable(compactor):
+            raise NotImplementedError("wrapped model does not support native compaction")
+        return await compactor(request)
+
     def _begin_span(self, request: Any) -> _OpenSpan | None:
         """按请求元数据打开 generation 跨度；无法关联 trace 时返回 ``None``。"""
         try:
@@ -282,6 +301,25 @@ class OpenTelemetryModelClient:
         aclose = getattr(self._client, "aclose", None)
         if callable(aclose):
             await aclose()
+
+    @property
+    def descriptor(self) -> Any:
+        """透传底层模型描述，供能力协商和上下文预算使用。"""
+        return getattr(self._client, "descriptor", None)
+
+    async def count_input_tokens(self, request: Any) -> int:
+        """透传可选的精确 Token 计数能力。"""
+        counter = getattr(self._client, "count_input_tokens", None)
+        if not callable(counter):
+            raise NotImplementedError("wrapped model does not support exact token counting")
+        return int(await counter(request))
+
+    async def compact_input(self, request: Any) -> Any:
+        """透传可选的供应商原生压缩能力。"""
+        compactor = getattr(self._client, "compact_input", None)
+        if not callable(compactor):
+            raise NotImplementedError("wrapped model does not support native compaction")
+        return await compactor(request)
 
     def _set_request_attributes(
         self,

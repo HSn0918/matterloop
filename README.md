@@ -61,17 +61,17 @@ Python 3.10–3.14。
 Policies、Agents 和 Observability，不会安装 FastAPI、Celery、Redis 或可选 SDK：
 
 ```bash
-# 应用开发：跟随 0.1 系列的兼容更新
+# 应用开发：跟随 0.2 系列的兼容更新
 python -m pip install --index-url https://pypi.org/simple \
-  "matterloop-presets>=0.1.0,<0.2.0"
+  "matterloop-presets>=0.2.0,<0.3.0"
 
 # 生产与 CI：固定经过验证的制品版本
 python -m pip install --index-url https://pypi.org/simple \
-  "matterloop-presets==0.1.2"
+  "matterloop-presets==0.2.0"
 ```
 
-`v0.1.2` 的 12 个发行包均提供 wheel、sdist 和 Trusted Publishing 发布证明；对应的发布记录见
-[GitHub Release](https://github.com/huleidada/matterloop/releases/tag/v0.1.2)。建议在虚拟环境中安装，
+`v0.2.0` 的 12 个发行包均提供 wheel、sdist 和 Trusted Publishing 发布证明；对应的发布记录见
+[GitHub Release](https://github.com/huleidada/matterloop/releases/tag/v0.2.0)。建议在虚拟环境中安装，
 并始终使用 `python -m pip`，确保制品进入当前 Python 解释器。
 
 ### 按需安装组件
@@ -97,12 +97,12 @@ python -m pip install --index-url https://pypi.org/simple \
 例如，只安装 Core 和模型抽象，或在基础装配上增加一种队列集成：
 
 ```bash
-python -m pip install "matterloop-core>=0.1.0,<0.2.0" \
-  "matterloop-models>=0.1.0,<0.2.0"
+python -m pip install "matterloop-core>=0.2.0,<0.3.0" \
+  "matterloop-models>=0.2.0,<0.3.0"
 
-python -m pip install "matterloop-presets==0.1.2" \
-  "matterloop-integration-fastapi==0.1.2" \
-  "matterloop-integration-celery==0.1.2"
+python -m pip install "matterloop-presets==0.2.0" \
+  "matterloop-integration-fastapi==0.2.0" \
+  "matterloop-integration-celery==0.2.0"
 ```
 
 Celery 推送队列与 Redis 拉取队列是两种任务传输方案，按部署方式二选一。Redis 的
@@ -114,11 +114,11 @@ Celery 推送队列与 Redis 拉取队列是两种任务传输方案，按部署
 
 ```bash
 # OpenAI SDK；也可用于 DeepSeek、千问、智谱和 MiniMax 的 OpenAI-compatible 客户端
-python -m pip install "matterloop-models[openai]>=0.1.0,<0.2.0"
+python -m pip install "matterloop-models[openai]>=0.2.0,<0.3.0"
 
 # MCP SDK 与 OpenTelemetry API
-python -m pip install "matterloop-tools[mcp]>=0.1.0,<0.2.0" \
-  "matterloop-observability[otel]>=0.1.0,<0.2.0"
+python -m pip install "matterloop-tools[mcp]>=0.2.0,<0.3.0" \
+  "matterloop-observability[otel]>=0.2.0,<0.3.0"
 ```
 
 SDK client、模型名、端点、连接池和凭据仍由应用构造并注入；MatterLoop 源码不会读取 `.env` 或环境
@@ -132,7 +132,7 @@ SDK client、模型名、端点、连接池和凭据仍由应用构造并注入�
 ```bash
 python -m pip install \
   --index-url https://packages.example.com/repository/pypi/simple \
-  "matterloop-presets==0.1.2"
+  "matterloop-presets==0.2.0"
 ```
 
 - 使用能够代理公共 PyPI 的单一企业索引，或确保其中包含 8 个基础发行包及批准的第三方依赖。
@@ -145,7 +145,7 @@ python -m pip install \
 
 ```bash
 python -m pip install --no-index --find-links /opt/matterloop-wheelhouse \
-  "matterloop-presets==0.1.2"
+  "matterloop-presets==0.2.0"
 ```
 
 ### 验证安装
@@ -157,7 +157,7 @@ python -m pip check
 python -c "from importlib.metadata import version; import matterloop_core, matterloop_presets; print(version('matterloop-presets'))"
 ```
 
-预期输出版本 `0.1.2`，且 `pip check` 报告 `No broken requirements found`。
+预期输出版本 `0.2.0`，且 `pip check` 报告 `No broken requirements found`。
 
 ## 快速开始
 

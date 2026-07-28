@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from matterloop_core import (
     ArtifactRef,
+    ExternalStateRef,
     HumanInteractionRecord,
     HumanInteractionRequest,
 )
@@ -465,6 +466,7 @@ class TeamSnapshot:
     pending_interaction: HumanInteractionRequest | None = None
     pending_review: TeamReview | None = None
     human_interactions: tuple[HumanInteractionRecord, ...] = ()
+    external_state_refs: tuple[ExternalStateRef, ...] = ()
     review_approved_cycle: int | None = None
     active_elapsed_seconds: float = 0.0
     active_started_at: datetime | None = None

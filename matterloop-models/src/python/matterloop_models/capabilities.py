@@ -30,6 +30,8 @@ class ModelFeature(str, Enum):
     OPAQUE_CONTINUATION = "opaque_continuation"
     REASONING = "reasoning"
     TEMPERATURE = "temperature"
+    EXACT_TOKEN_COUNT = "exact_token_count"
+    NATIVE_COMPACTION = "native_compaction"
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +96,7 @@ class ModelDescriptor:
     provider: str
     model: str
     capabilities: ModelCapabilities = field(default_factory=ModelCapabilities)
+    context_window_tokens: int | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -106,6 +109,8 @@ class ModelDescriptor:
             raise ValueError("model descriptor model must not be empty")
         if not isinstance(self.capabilities, ModelCapabilities):
             raise TypeError("model descriptor capabilities must be ModelCapabilities")
+        if self.context_window_tokens is not None and self.context_window_tokens < 1:
+            raise ValueError("model context window tokens must be at least 1")
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))

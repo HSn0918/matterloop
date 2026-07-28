@@ -101,6 +101,15 @@ def build_production_runtime(
     assert audit_publisher is not None
 
     actual_config = config or ProductionPresetConfig()
+    if actual_config.context is not None:
+        if actual_config.context.retention is None:
+            raise PresetConfigurationError(
+                "production context lifecycle requires an explicit retention policy"
+            )
+        if actual_config.context.semantic_compactor is None:
+            raise PresetConfigurationError(
+                "production context lifecycle requires an explicit semantic compactor"
+            )
     tools = ToolRegistry()
     publishers: tuple[EventPublisher, ...] = (audit_publisher,)
     extra_resources: tuple[AsyncClosable, ...] = ()

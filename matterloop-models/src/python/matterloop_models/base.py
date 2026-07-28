@@ -6,7 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypeAlias, runtime_checkable
+from urllib.parse import quote
+from uuid import uuid4
 
 
 def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
@@ -35,6 +37,68 @@ class ToolChoice(str, Enum):
     REQUIRED = "required"
 
 
+class ContextInputMode(str, Enum):
+    """声明带作用域的模型输入如何更新已保存上下文。"""
+
+    REPLACE = "replace"
+    APPEND = "append"
+
+
+class ModelItemCategory(str, Enum):
+    """描述规范模型输入在 Agent 上下文中的语义类别。"""
+
+    SYSTEM = "system"
+    GOAL = "goal"
+    WORKING_MEMORY = "working_memory"
+    HISTORY = "history"
+    TOOL_RESULT = "tool_result"
+    AGENT_STATE = "agent_state"
+
+
+class ModelItemRetention(str, Enum):
+    """描述 Context Lifecycle Engine 对输入项的保留要求。"""
+
+    PINNED = "pinned"
+    RECENT = "recent"
+    SUMMARIZABLE = "summarizable"
+    EXTERNALIZED = "externalized"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelContextScope:
+    """标识一次模型调用所属的可恢复上下文。"""
+
+    run_id: str
+    participant: str
+    tenant_id: str = "default"
+    task_id: str | None = None
+    invocation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """规范作用域文本，避免不同进程构造出不一致的存储键。"""
+        for name in ("run_id", "participant", "tenant_id"):
+            value = getattr(self, name).strip()
+            if not value:
+                raise ValueError(f"context scope {name} must not be empty")
+            object.__setattr__(self, name, value)
+        for name in ("task_id", "invocation_id"):
+            value = getattr(self, name)
+            if value is not None:
+                normalized = value.strip()
+                if not normalized:
+                    raise ValueError(f"context scope {name} must not be empty")
+                object.__setattr__(self, name, normalized)
+
+    @property
+    def key(self) -> str:
+        """返回不包含调用序号的稳定上下文键。"""
+        task = self.task_id or "-"
+        return ":".join(
+            quote(value, safe="-._~")
+            for value in (self.tenant_id, self.run_id, self.participant, task)
+        )
+
+
 @runtime_checkable
 class ModelContinuation(Protocol):
     """表示只能原样交还给对应模型适配器的不透明续轮状态。
@@ -60,7 +124,7 @@ class ModelMessage:
     """
 
     role: MessageRole
-    content: str
+    content: str = field(repr=False)
     name: str | None = None
 
     def __post_init__(self) -> None:
@@ -69,6 +133,111 @@ class ModelMessage:
             raise ValueError("message content must not be empty")
         if self.name is not None and not self.name.strip():
             raise ValueError("message name must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelMessageItem:
+    """表示可持久化、可分类的规范消息输入。"""
+
+    role: MessageRole
+    content: str = field(repr=False)
+    name: str | None = None
+    category: ModelItemCategory | None = None
+    retention: ModelItemRetention | None = None
+    item_id: str = field(default_factory=lambda: uuid4().hex)
+    metadata: Mapping[str, object] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        """校验消息并为系统指令选择安全的默认保留策略。"""
+        if not self.content.strip():
+            raise ValueError("message item content must not be empty")
+        if self.name is not None and not self.name.strip():
+            raise ValueError("message item name must not be empty")
+        if not self.item_id.strip():
+            raise ValueError("message item id must not be empty")
+        protected = self.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER}
+        if self.category is None:
+            object.__setattr__(
+                self,
+                "category",
+                ModelItemCategory.SYSTEM if protected else ModelItemCategory.HISTORY,
+            )
+        if self.retention is None:
+            object.__setattr__(
+                self,
+                "retention",
+                ModelItemRetention.PINNED if protected else ModelItemRetention.SUMMARIZABLE,
+            )
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
+
+
+@dataclass(frozen=True, slots=True)
+class ModelToolCallItem:
+    """表示可跨模型轮次保存的规范工具调用。"""
+
+    call_id: str
+    name: str
+    arguments: Mapping[str, object] = field(default_factory=dict, repr=False)
+    category: ModelItemCategory = ModelItemCategory.AGENT_STATE
+    retention: ModelItemRetention = ModelItemRetention.PINNED
+    item_id: str = field(default_factory=lambda: uuid4().hex)
+    metadata: Mapping[str, object] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        """保证调用可关联并冻结参数与元数据。"""
+        if not self.call_id.strip() or not self.name.strip() or not self.item_id.strip():
+            raise ValueError("tool call item identifiers must not be empty")
+        object.__setattr__(self, "arguments", _freeze_mapping(self.arguments))
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
+
+
+@dataclass(frozen=True, slots=True)
+class ModelToolOutputItem:
+    """表示可外置并可关联回工具调用的规范结果。"""
+
+    call_id: str
+    output: str = field(repr=False)
+    is_error: bool = False
+    artifact_uri: str | None = None
+    category: ModelItemCategory = ModelItemCategory.TOOL_RESULT
+    retention: ModelItemRetention = ModelItemRetention.PINNED
+    item_id: str = field(default_factory=lambda: uuid4().hex)
+    metadata: Mapping[str, object] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        """校验调用关联和可选制品引用。"""
+        if not self.call_id.strip() or not self.item_id.strip():
+            raise ValueError("tool output item identifiers must not be empty")
+        if self.artifact_uri is not None and not self.artifact_uri.strip():
+            raise ValueError("tool output artifact URI must not be empty")
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCompactionItem:
+    """保存供应商原生或框架语义压缩产生的规范输入项。"""
+
+    payload: str = field(repr=False)
+    provider: str
+    model: str
+    native: bool = True
+    category: ModelItemCategory = ModelItemCategory.HISTORY
+    retention: ModelItemRetention = ModelItemRetention.SUMMARIZABLE
+    item_id: str = field(default_factory=lambda: uuid4().hex)
+    metadata: Mapping[str, object] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        """拒绝无法恢复或无法路由的压缩载荷。"""
+        if not self.payload or not self.provider.strip() or not self.model.strip():
+            raise ValueError("compaction payload, provider, and model must not be empty")
+        if not self.item_id.strip():
+            raise ValueError("compaction item id must not be empty")
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
+
+
+ModelInputItem: TypeAlias = (
+    ModelMessageItem | ModelToolCallItem | ModelToolOutputItem | ModelCompactionItem
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +277,7 @@ class ToolCall:
 
     call_id: str
     name: str
-    arguments: Mapping[str, object] = field(default_factory=dict)
+    arguments: Mapping[str, object] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         """保证工具调用可关联并冻结参数。"""
@@ -130,7 +299,7 @@ class ToolOutput:
     """
 
     call_id: str
-    output: str
+    output: str = field(repr=False)
     is_error: bool = False
 
     def __post_init__(self) -> None:
@@ -192,7 +361,8 @@ class ModelRequest:
         metadata: 只在 MatterLoop 内部传播的关联信息。
     """
 
-    messages: tuple[ModelMessage, ...]
+    messages: tuple[ModelMessage, ...] = ()
+    input_items: tuple[ModelInputItem, ...] = ()
     tools: tuple[ToolDefinition, ...] = ()
     tool_outputs: tuple[ToolOutput, ...] = ()
     previous_response_id: str | None = None
@@ -203,12 +373,38 @@ class ModelRequest:
     tool_choice: ToolChoice | None = None
     continuation: ModelContinuation | None = field(default=None, repr=False)
     usage_scopes: tuple[str, ...] = ()
-    metadata: Mapping[str, object] = field(default_factory=dict)
+    context_scope: ModelContextScope | None = None
+    context_mode: ContextInputMode = ContextInputMode.REPLACE
+    metadata: Mapping[str, object] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         """校验调用边界并冻结映射字段。"""
-        if not self.messages and not self.tool_outputs and self.continuation is None:
-            raise ValueError("model request requires messages, tool outputs, or continuation")
+        if (
+            not self.messages
+            and not self.input_items
+            and not self.tool_outputs
+            and self.continuation is None
+        ):
+            raise ValueError(
+                "model request requires messages, input items, tool outputs, or continuation"
+            )
+        if self.input_items and (
+            self.messages
+            or self.tool_outputs
+            or self.previous_response_id is not None
+            or self.continuation is not None
+        ):
+            raise ValueError(
+                "canonical input items must not be mixed with legacy conversation state"
+            )
+        item_types = (
+            ModelMessageItem,
+            ModelToolCallItem,
+            ModelToolOutputItem,
+            ModelCompactionItem,
+        )
+        if any(not isinstance(item, item_types) for item in self.input_items):
+            raise TypeError("input items must be canonical model input items")
         if self.previous_response_id is not None and not self.previous_response_id.strip():
             raise ValueError("previous response id must not be empty")
         if not self.response_schema_name.strip():
@@ -221,6 +417,12 @@ class ModelRequest:
             raise TypeError("tool choice must be a ToolChoice")
         if self.continuation is not None and not isinstance(self.continuation, ModelContinuation):
             raise TypeError("continuation must implement ModelContinuation")
+        if self.context_scope is not None and not isinstance(self.context_scope, ModelContextScope):
+            raise TypeError("context scope must be a ModelContextScope")
+        if not isinstance(self.context_mode, ContextInputMode):
+            raise TypeError("context mode must be a ContextInputMode")
+        if self.context_mode is ContextInputMode.APPEND and self.context_scope is None:
+            raise ValueError("append context mode requires a context scope")
         if any(not isinstance(scope, str) for scope in self.usage_scopes):
             raise TypeError("usage scope must be text")
         normalized_scopes = tuple(scope.strip() for scope in self.usage_scopes)
@@ -247,12 +449,13 @@ class ModelResponse:
         metadata: 不含原始 SDK 对象和凭据的供应商元数据。
     """
 
-    output_text: str = ""
+    output_text: str = field(default="", repr=False)
     tool_calls: tuple[ToolCall, ...] = ()
+    output_items: tuple[ModelInputItem, ...] = ()
     usage: TokenUsage = field(default_factory=TokenUsage)
     response_id: str | None = None
     continuation: ModelContinuation | None = field(default=None, repr=False)
-    metadata: Mapping[str, object] = field(default_factory=dict)
+    metadata: Mapping[str, object] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         """冻结元数据并拒绝空响应标识。"""
@@ -260,6 +463,14 @@ class ModelResponse:
             raise ValueError("response id must not be empty")
         if self.continuation is not None and not isinstance(self.continuation, ModelContinuation):
             raise TypeError("continuation must implement ModelContinuation")
+        item_types = (
+            ModelMessageItem,
+            ModelToolCallItem,
+            ModelToolOutputItem,
+            ModelCompactionItem,
+        )
+        if any(not isinstance(item, item_types) for item in self.output_items):
+            raise TypeError("output items must be canonical model input items")
         object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
 
 
@@ -276,4 +487,22 @@ class ModelClient(Protocol):
         Returns:
             归一化后的模型响应。
         """
+        ...
+
+
+@runtime_checkable
+class ExactTokenCountingClient(Protocol):
+    """可选的供应商精确输入 Token 计数能力。"""
+
+    async def count_input_tokens(self, request: ModelRequest) -> int:
+        """返回完整请求的输入 Token 数。"""
+        ...
+
+
+@runtime_checkable
+class NativeCompactingClient(Protocol):
+    """可选的供应商原生上下文压缩能力。"""
+
+    async def compact_input(self, request: ModelRequest) -> tuple[ModelInputItem, ...]:
+        """返回可作为后续输入原样续传的压缩窗口。"""
         ...

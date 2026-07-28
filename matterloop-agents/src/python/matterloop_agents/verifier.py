@@ -6,9 +6,17 @@ import json
 from collections.abc import Mapping
 
 from matterloop_core import ExecutionResult, LoopContext, PlanStep, VerificationResult
-from matterloop_models import MessageRole, ModelMessage, ModelRegistry, ModelRequest
+from matterloop_models import (
+    ContextInputMode,
+    MessageRole,
+    ModelContextScope,
+    ModelMessage,
+    ModelRegistry,
+    ModelRequest,
+)
 
 from matterloop_agents._parsing import (
+    context_tenant_id,
     parse_json_object,
     require_boolean,
     require_score,
@@ -72,6 +80,14 @@ class CriteriaVerifier:
             response_schema_name="matterloop_verification",
             max_output_tokens=self._config.max_output_tokens,
             usage_scopes=self._usage_scopes(context),
+            context_scope=ModelContextScope(
+                tenant_id=context_tenant_id(context.request.metadata),
+                run_id=context.run_id,
+                participant="verifier",
+                task_id=step.step_id,
+                invocation_id=f"attempt:{context.total_attempts + 1}",
+            ),
+            context_mode=ContextInputMode.REPLACE,
             metadata={"run_id": context.run_id, "step_id": step.step_id, "agent": "verifier"},
         )
         async with self._models.acquire(self._config.model) as model:

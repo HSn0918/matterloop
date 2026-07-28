@@ -24,13 +24,23 @@ from matterloop_integration_redis import (
     AsyncRedisClient,
     RedisCheckpointStore,
     RedisConfig,
+    RedisContextStore,
     RedisEventPublisher,
     RedisPayloadCodec,
     RedisPayloadError,
     RedisQueueBackend,
     RedisRunRepository,
 )
+from matterloop_models import (
+    MessageRole,
+    ModelContextScope,
+    ModelMessageItem,
+)
 from matterloop_runtime import (
+    ContextConflictError,
+    ContextRetentionPolicy,
+    ContextSnapshot,
+    ContextTokenState,
     DuplicateRunError,
     QueueAction,
     QueueBackend,
@@ -62,6 +72,28 @@ class FakeRedis:
     async def eval(self, script: str, numkeys: int, *keys_and_args: object) -> object:
         keys = tuple(str(value) for value in keys_and_args[:numkeys])
         args = keys_and_args[numkeys:]
+        if "matterloop:context-save" in script:
+            latest_key, version_key = keys
+            expected_revision = int(args[0])
+            revision = int(args[1])
+            payload = str(args[2])
+            ttl = int(args[3])
+            if ttl < 1 or revision != expected_revision + 1:
+                return -2
+            current = self.strings.get(latest_key)
+            if current is None:
+                if expected_revision != 0:
+                    return 0
+            else:
+                try:
+                    current_revision = int(current)
+                except (TypeError, ValueError):
+                    return -2
+                if current_revision != expected_revision:
+                    return 0
+            self.strings[version_key] = payload
+            self.strings[latest_key] = str(revision)
+            return revision
         if "matterloop:enqueue" in script:
             run_id, payload = str(args[0]), str(args[1])
             if run_id in self.queue_jobs:
@@ -259,6 +291,37 @@ class FakeRedis:
         self.delayed.pop(run_id, None)
         self.cancelled.discard(run_id)
         self.pending = [item for item in self.pending if item != run_id]
+
+
+def test_redis_context_store_saves_immutable_versions_with_cas() -> None:
+    async def scenario() -> None:
+        redis = FakeRedis()
+        store = RedisContextStore(
+            redis,
+            ContextRetentionPolicy(
+                snapshot_ttl_seconds=60,
+                archive_ttl_seconds=120,
+                tool_result_ttl_seconds=120,
+            ),
+        )
+        scope = ModelContextScope("run-context", "planner")
+        snapshot = ContextSnapshot(
+            key=scope.key,
+            scope=scope,
+            revision=1,
+            input_items=(ModelMessageItem(MessageRole.USER, "goal"),),
+            token_state=ContextTokenState(10, 20, 100),
+        )
+
+        reference = await store.save(snapshot, expected_revision=0)
+        restored = await store.load(scope.key)
+
+        assert reference.revision == 1
+        assert restored == snapshot
+        with pytest.raises(ContextConflictError):
+            await store.save(snapshot, expected_revision=0)
+
+    asyncio.run(scenario())
 
 
 def test_config_contains_no_connection_or_environment_fields() -> None:

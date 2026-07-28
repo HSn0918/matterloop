@@ -3,6 +3,7 @@
 from matterloop_core.context import (
     ArtifactRef,
     ExecutionResult,
+    ExternalStateRef,
     HumanAction,
     HumanInteractionKind,
     HumanInteractionRecord,
@@ -83,6 +84,7 @@ __all__ = [
     "EventHandler",
     "EventPublisher",
     "ExecutionResult",
+    "ExternalStateRef",
     "Executor",
     "FactoryCatalog",
     "HumanAction",

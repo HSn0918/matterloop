@@ -18,6 +18,7 @@ from matterloop_core.context.human import (
 from matterloop_core.context.models import (
     ArtifactRef,
     ExecutionResult,
+    ExternalStateRef,
     IterationRecord,
     LoopContext,
     LoopLimits,
@@ -37,9 +38,12 @@ class LoopCheckpointCodec:
     字段类型，避免把损坏或来自其他版本的数据静默解释成当前状态。
     """
 
+    schema_version = 2
+
     def encode(self, context: LoopContext) -> dict[str, object]:
         """把上下文编码为可以直接交给 ``json.dumps`` 的字典。"""
         return {
+            "schema_version": self.schema_version,
             "context": {
                 "request": self._encode_request(context.request),
                 "run_id": context.run_id,
@@ -93,6 +97,10 @@ class LoopCheckpointCodec:
                 "propagation_context": self._string_mapping(
                     context.propagation_context, "propagation_context"
                 ),
+                "external_state_refs": [
+                    self._encode_external_state_ref(reference)
+                    for reference in context.external_state_refs
+                ],
                 "started_at": context.started_at.isoformat(),
                 "updated_at": context.updated_at.isoformat(),
             },
@@ -105,9 +113,16 @@ class LoopCheckpointCodec:
             CheckpointSchemaError: 当版本不支持或字段结构无效时抛出。
         """
         try:
-            if set(payload) != {"context"}:
+            keys = set(payload)
+            if keys == {"context"}:
+                version = 1
+            elif keys == {"schema_version", "context"}:
+                version = self._integer(payload.get("schema_version"), "schema_version")
+                if version != self.schema_version:
+                    raise CheckpointSchemaError(f"unsupported checkpoint schema version: {version}")
+            else:
                 raise CheckpointSchemaError(
-                    "checkpoint must contain only the current 'context' field"
+                    "checkpoint must contain context and an optional supported schema_version"
                 )
             data = self._mapping(payload.get("context"), "context")
             request = self._decode_request(self._mapping(data.get("request"), "request"))
@@ -180,6 +195,18 @@ class LoopCheckpointCodec:
                 propagation_context=self._string_mapping(
                     data.get("propagation_context"), "propagation_context"
                 ),
+                external_state_refs=(
+                    []
+                    if version == 1
+                    else [
+                        self._decode_external_state_ref(
+                            self._mapping(item, "external_state_refs item")
+                        )
+                        for item in self._sequence(
+                            data.get("external_state_refs"), "external_state_refs"
+                        )
+                    ]
+                ),
                 started_at=self._datetime(data.get("started_at"), "started_at"),
                 updated_at=self._datetime(data.get("updated_at"), "updated_at"),
             )
@@ -223,6 +250,30 @@ class LoopCheckpointCodec:
             },
             "metadata": self._json_value(request.metadata, "request.metadata"),
         }
+
+    @staticmethod
+    def _encode_external_state_ref(reference: ExternalStateRef) -> dict[str, object]:
+        return {
+            "kind": reference.kind,
+            "key": reference.key,
+            "revision": reference.revision,
+            "checksum": reference.checksum,
+            "schema_version": reference.schema_version,
+        }
+
+    def _decode_external_state_ref(
+        self,
+        data: Mapping[str, object],
+    ) -> ExternalStateRef:
+        return ExternalStateRef(
+            kind=self._text(data.get("kind"), "external state kind"),
+            key=self._text(data.get("key"), "external state key"),
+            revision=self._integer(data.get("revision"), "external state revision"),
+            checksum=self._text(data.get("checksum"), "external state checksum"),
+            schema_version=self._integer(
+                data.get("schema_version"), "external state schema_version"
+            ),
+        )
 
     def _decode_request(self, data: Mapping[str, object]) -> LoopRequest:
         limits_data = self._mapping(data.get("limits"), "limits")

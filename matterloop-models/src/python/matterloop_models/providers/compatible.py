@@ -12,8 +12,13 @@ from typing import Protocol, cast, runtime_checkable
 
 from matterloop_models.base import (
     MessageRole,
+    ModelCompactionItem,
+    ModelInputItem,
+    ModelMessageItem,
     ModelRequest,
     ModelResponse,
+    ModelToolCallItem,
+    ModelToolOutputItem,
     TokenUsage,
     ToolCall,
 )
@@ -423,6 +428,8 @@ class OpenAICompatibleChatModelClient:
         return messages
 
     def _map_messages(self, request: ModelRequest) -> list[dict[str, object]]:
+        if request.input_items:
+            return self._map_input_items(request.input_items)
         messages: list[dict[str, object]] = []
         for message in request.messages:
             role = message.role.value
@@ -435,6 +442,90 @@ class OpenAICompatibleChatModelClient:
                     **({"name": message.name} if message.name is not None else {}),
                 }
             )
+        return messages
+
+    def _map_input_items(
+        self,
+        items: Sequence[ModelInputItem],
+    ) -> list[dict[str, object]]:
+        """把规范输入窗口映射为无私有 continuation 的 Chat 消息。"""
+        messages: list[dict[str, object]] = []
+        index = 0
+        while index < len(items):
+            item = items[index]
+            if isinstance(item, ModelMessageItem):
+                role = item.role.value
+                if item.role is MessageRole.DEVELOPER:
+                    role = self._config.developer_role.value
+                messages.append(
+                    {
+                        "role": role,
+                        "content": item.content,
+                        **({"name": item.name} if item.name is not None else {}),
+                    }
+                )
+                index += 1
+            elif isinstance(item, ModelToolCallItem):
+                calls: list[dict[str, object]] = []
+                first = item
+                while index < len(items) and isinstance(items[index], ModelToolCallItem):
+                    call = cast(ModelToolCallItem, items[index])
+                    calls.append(
+                        {
+                            "id": call.call_id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": json.dumps(
+                                    dict(call.arguments),
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                            },
+                        }
+                    )
+                    index += 1
+                assistant: dict[str, object] = {
+                    "role": "assistant",
+                    "content": first.metadata.get("assistant_content"),
+                    "tool_calls": calls,
+                }
+                private_fields = first.metadata.get("assistant_private_fields")
+                if private_fields is not None:
+                    if (
+                        first.metadata.get("provider") != self._config.provider
+                        or first.metadata.get("model") != self._config.model
+                        or not isinstance(private_fields, Mapping)
+                        or not all(isinstance(key, str) for key in private_fields)
+                    ):
+                        raise ModelCapabilityError(
+                            "canonical tool call private state belongs to another model"
+                        )
+                    assistant.update(_copy_mapping(cast(Mapping[str, object], private_fields)))
+                messages.append(assistant)
+            elif isinstance(item, ModelToolOutputItem):
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": item.call_id,
+                        "content": self._format_tool_output(item.output, item.is_error),
+                    }
+                )
+                index += 1
+            elif isinstance(item, ModelCompactionItem):
+                if item.native:
+                    raise ModelCapabilityError(
+                        "Chat Completions cannot consume native compaction items"
+                    )
+                messages.append(
+                    {
+                        "role": self._config.developer_role.value,
+                        "content": f"Previous context summary:\n{item.payload}",
+                    }
+                )
+                index += 1
+            else:
+                raise TypeError(f"unsupported canonical input item: {type(item).__name__}")
         return messages
 
     @staticmethod
@@ -514,9 +605,34 @@ class OpenAICompatibleChatModelClient:
         response_id = self._read(response, "id", None)
         response_model = self._read(response, "model", self._config.model)
         finish_reason = self._read(choice, "finish_reason", None)
+        normalized_items: list[ModelInputItem] = []
+        if content and not tool_calls:
+            normalized_items.append(ModelMessageItem(role=MessageRole.ASSISTANT, content=content))
+        for index, call in enumerate(tool_calls):
+            metadata: dict[str, object] = {}
+            if index == 0 and content:
+                metadata["assistant_content"] = content
+            if index == 0 and private_fields:
+                metadata.update(
+                    {
+                        "provider_private_state": True,
+                        "provider": self._config.provider,
+                        "model": self._config.model,
+                        "assistant_private_fields": dict(private_fields),
+                    }
+                )
+            normalized_items.append(
+                ModelToolCallItem(
+                    call_id=call.call_id,
+                    name=call.name,
+                    arguments=call.arguments,
+                    metadata=metadata,
+                )
+            )
         return ModelResponse(
             output_text=content or "",
             tool_calls=tool_calls,
+            output_items=tuple(normalized_items),
             usage=usage,
             response_id=response_id if isinstance(response_id, str) else None,
             continuation=continuation,

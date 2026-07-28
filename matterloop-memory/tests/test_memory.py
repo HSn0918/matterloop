@@ -8,11 +8,13 @@ from matterloop_core import CheckpointConflictError, LoopContext, LoopRequest
 from matterloop_memory import (
     InMemoryCheckpointStore,
     InMemoryMemoryStore,
+    MemoryContextSink,
     MemoryKind,
     MemoryQuery,
     MemoryRecord,
     NullMemoryStore,
 )
+from matterloop_models import ModelContextScope
 
 
 def test_memory_store_filters_and_scores_records() -> None:
@@ -28,6 +30,25 @@ def test_memory_store_filters_and_scores_records() -> None:
         assert len(matches) == 1
         assert matches[0].score == 1
         assert await store.clear("project") == 1
+
+    asyncio.run(scenario())
+
+
+def test_context_memory_sink_deduplicates_admitted_facts() -> None:
+    """重复压缩产生的同一事实必须覆盖同一稳定语义记忆。"""
+
+    async def scenario() -> None:
+        store = InMemoryMemoryStore()
+        sink = MemoryContextSink(store, namespace="context-facts")
+        scope = ModelContextScope("run-memory", "planner", tenant_id="tenant-a")
+
+        await sink.remember(scope, ("stable fact",), source_item_ids=("a", "b"))
+        await sink.remember(scope, ("stable fact",), source_item_ids=("a", "b"))
+        matches = await store.search(MemoryQuery("context-facts"))
+
+        assert len(matches) == 1
+        assert matches[0].record.content == "stable fact"
+        assert matches[0].record.metadata["tenant_id"] == "tenant-a"
 
     asyncio.run(scenario())
 

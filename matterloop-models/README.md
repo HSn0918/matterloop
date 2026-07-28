@@ -65,11 +65,11 @@ async with models.acquire("worker") as client:
 - `ModelMessage(role, content, name)`：一条 system/developer/user/assistant/tool 消息。
 - `ToolDefinition(name, description, parameters, strict)`：模型可见的函数工具定义。
 - `ToolCall(call_id, name, arguments)` 与 `ToolOutput(call_id, output, is_error)`：调用及本地结果。
-- `ModelRequest(messages, tools, tool_outputs, previous_response_id, response_schema, response_schema_name, max_output_tokens, temperature, tool_choice, continuation, usage_scopes, metadata)`：一次生成请求。
+- `ModelRequest(messages, input_items, tools, tool_outputs, previous_response_id, response_schema, response_schema_name, max_output_tokens, temperature, tool_choice, continuation, usage_scopes, context_scope, context_mode, metadata)`：一次生成请求；规范输入与旧会话字段不能混用。
 - `TokenUsage(input_tokens, output_tokens, total_tokens, cache_hit_tokens, cache_miss_tokens, reasoning_tokens)`：供应商报告的用量；缓存和 reasoning 是明细，不应重复加到总量。
-- `ModelResponse(output_text, tool_calls, usage, response_id, continuation, metadata)`：归一化结果。
+- `ModelResponse(output_text, tool_calls, output_items, usage, response_id, continuation, metadata)`：归一化结果。
 - `ModelCapabilities(supported, unsupported)`：能力三态集合；未出现在两者中的能力为 unknown。
-- `ModelDescriptor(provider, model, capabilities, metadata)`：注册表中可发现的非敏感模型描述。
+- `ModelDescriptor(provider, model, capabilities, context_window_tokens, metadata)`：注册表中可发现的非敏感模型描述。
 - `ModelRequirements(required_features, provider, model, allow_unknown)`：路由预检条件，默认不接受 unknown。
 
 `ModelRequest.metadata` 和普通消息会在 MatterLoop 内传播，但不会自动脱敏。映射字段只冻结顶层，

@@ -8,13 +8,20 @@ from collections.abc import Mapping
 from matterloop_core import LoopContext, Plan, PlanStep
 from matterloop_memory import MemoryQuery, MemoryStore
 from matterloop_models import (
+    ContextInputMode,
     MessageRole,
+    ModelContextScope,
     ModelMessage,
     ModelRegistry,
     ModelRequest,
 )
 
-from matterloop_agents._parsing import parse_json_object, require_boolean, require_string
+from matterloop_agents._parsing import (
+    context_tenant_id,
+    parse_json_object,
+    require_boolean,
+    require_string,
+)
 from matterloop_agents.config import ModelPlannerConfig
 from matterloop_agents.errors import AgentModelOutputError, PlanStepLimitError
 
@@ -96,6 +103,13 @@ class ModelPlanner:
             response_schema_name="matterloop_plan",
             max_output_tokens=self._config.max_output_tokens,
             usage_scopes=self._usage_scopes(context),
+            context_scope=ModelContextScope(
+                tenant_id=context_tenant_id(context.request.metadata),
+                run_id=context.run_id,
+                participant="planner",
+                invocation_id=f"cycle:{context.cycle_count + 1}",
+            ),
+            context_mode=ContextInputMode.REPLACE,
             metadata={"run_id": context.run_id, "agent": "planner"},
         )
         # 租约保证调用期间客户端不会被热替换提前关闭。

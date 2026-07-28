@@ -12,7 +12,14 @@ from matterloop_core import (
     HumanInteractionKind,
     HumanInteractionRequest,
 )
-from matterloop_models import MessageRole, ModelMessage, ModelRegistry, ModelRequest
+from matterloop_models import (
+    ContextInputMode,
+    MessageRole,
+    ModelContextScope,
+    ModelMessage,
+    ModelRegistry,
+    ModelRequest,
+)
 
 from matterloop_agents._parsing import (
     parse_json_object,
@@ -59,6 +66,32 @@ def _validate_model_config(model: str, max_output_tokens: int) -> None:
         raise ValueError("model registry name must not be empty")
     if max_output_tokens < 1:
         raise ValueError("max output tokens must be at least 1")
+
+
+def _context_scope(
+    request: TeamRequest,
+    participant: str,
+    *,
+    run_id: str | None = None,
+    task_id: str | None = None,
+    invocation_id: str | None = None,
+) -> ModelContextScope | None:
+    """从团队运行注入的保留元数据构造稳定模型上下文作用域。"""
+    resolved_run_id = run_id
+    if resolved_run_id is None:
+        candidate = request.metadata.get("_matterloop_team_run_id")
+        resolved_run_id = candidate if isinstance(candidate, str) else None
+    if resolved_run_id is None:
+        return None
+    tenant = request.metadata.get("tenant_id", "default")
+    tenant_id = tenant if isinstance(tenant, str) and tenant.strip() else "default"
+    return ModelContextScope(
+        tenant_id=tenant_id,
+        run_id=resolved_run_id,
+        participant=participant,
+        task_id=task_id,
+        invocation_id=invocation_id,
+    )
 
 
 def _require_exact_keys(
@@ -363,6 +396,17 @@ class ModelTeamPlanner:
             response_schema_name="matterloop_team_plan",
             max_output_tokens=self._config.max_output_tokens,
             usage_scopes=usage_scopes,
+            context_scope=_context_scope(
+                request,
+                "team_planner",
+                run_id=None if isinstance(context, TeamRequest) else context.run_id,
+                invocation_id=(
+                    None
+                    if isinstance(context, TeamRequest)
+                    else f"cycle:{context.cycle}:revision:{context.plan_revision}"
+                ),
+            ),
+            context_mode=ContextInputMode.REPLACE,
             metadata={"agent": "team_planner"},
         )
         async with self._models.acquire(self._config.model) as model:
@@ -491,6 +535,14 @@ class ModelTaskVerifier:
                 context.request,
                 context.team_run_id,
             ),
+            context_scope=_context_scope(
+                context.request,
+                "team_task_verifier",
+                run_id=context.team_run_id,
+                task_id=context.task.task_id,
+                invocation_id=f"attempt:{context.attempt}",
+            ),
+            context_mode=ContextInputMode.REPLACE,
             metadata={
                 "agent": "team_task_verifier",
                 "team_run_id": context.team_run_id,
@@ -612,6 +664,8 @@ class ModelResultAggregator:
             response_schema_name="matterloop_team_result",
             max_output_tokens=self._config.max_output_tokens,
             usage_scopes=ModelTeamPlanner._usage_scopes(request),
+            context_scope=_context_scope(request, "team_result_aggregator"),
+            context_mode=ContextInputMode.REPLACE,
             metadata={"agent": "team_result_aggregator"},
         )
         async with self._models.acquire(self._config.model) as model:
@@ -697,6 +751,13 @@ class ModelTeamReviewer:
                 context.request,
                 context.run_id,
             ),
+            context_scope=_context_scope(
+                context.request,
+                "team_reviewer",
+                run_id=context.run_id,
+                invocation_id=f"cycle:{context.cycle}",
+            ),
+            context_mode=ContextInputMode.REPLACE,
             metadata={
                 "agent": "team_reviewer",
                 "team_run_id": context.run_id,

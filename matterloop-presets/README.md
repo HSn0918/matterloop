@@ -110,8 +110,8 @@ instrumentation 的 Span 处在同一条 Trace。Provider 的创建、全局注�
 
 配置均为 frozen dataclass：
 
-- `AgentPresetConfig(model_name, max_plan_steps, max_tool_rounds, pass_score, max_identical_feedback, retry)`：
-  默认分别为 `"default"`、`20`、`8`、`80`、`2` 和默认重试配置。
+- `AgentPresetConfig(model_name, max_plan_steps, max_tool_rounds, pass_score, max_identical_feedback, retry, context)`：
+  默认分别为 `"default"`、`20`、`8`、`80`、`2`、默认重试配置和不启用 Context Lifecycle。
 - `MinimalPresetConfig` 与 `ProductionPresetConfig` 当前不增加字段。
 - `CodingPresetConfig` 增加 `privileged_executor`、`allowed_commands`、`shell_environment`、
   `max_read_bytes`、`max_write_bytes`、`max_shell_timeout_seconds` 和 `max_shell_output_bytes`。默认高权限
