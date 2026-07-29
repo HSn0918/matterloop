@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Protocol, runtime_checkable
 
 from matterloop_core import ApprovalDecision
@@ -72,6 +72,68 @@ class AgentEndpoint(Protocol):
         Returns:
             Agent 产生的结构化任务结果。
         """
+        ...
+
+
+TeamTaskInvocation = Callable[[AgentTaskContext], Awaitable[TaskResult]]
+"""执行一次已分配团队任务，并允许中间件传入隔离上下文副本。"""
+
+
+@runtime_checkable
+class TeamTaskInvocationMiddleware(Protocol):
+    """在 Agent Endpoint 调用边界外包装一次团队任务。
+
+    中间件可以把关联信息写入传给 ``call_next`` 的不可变上下文副本，例如跨进程传播
+    ``traceparent``/``tracestate``。控制器仍负责 Agent 租约、结果校验、重试和状态转换；
+    中间件不得改写 ``TaskResult`` 的业务语义。该协议不依赖观测 SDK，使上层组件能以
+    结构化鸭子类型实现追踪、指标等横切能力。
+    """
+
+    async def invoke(
+        self,
+        context: AgentTaskContext,
+        call_next: TeamTaskInvocation,
+    ) -> TaskResult:
+        """包装一次 Endpoint 调用，并返回原始任务结果。"""
+        ...
+
+
+class PassthroughTeamTaskInvocationMiddleware:
+    """不改变团队任务调用行为的默认中间件。"""
+
+    async def invoke(
+        self,
+        context: AgentTaskContext,
+        call_next: TeamTaskInvocation,
+    ) -> TaskResult:
+        """直接执行下一层 Endpoint。"""
+        return await call_next(context)
+
+
+@runtime_checkable
+class TeamSnapshotPreparer(Protocol):
+    """在 Team 快照 CAS 保存前写入可持久化的中立关联信息。"""
+
+    async def prepare_snapshot(self, snapshot: TeamSnapshot) -> TeamSnapshot:
+        """返回要持久化的快照副本，不得改变业务状态。"""
+        ...
+
+
+@runtime_checkable
+class TeamInstrumentation(Protocol):
+    """由已启用观测的子 Runtime 暴露给 Team 控制器的中立能力包。
+
+    agents 只消费事件发布器和任务中间件，不导入任何 tracing SDK。
+    """
+
+    @property
+    def event_publisher(self) -> TeamEventPublisher:
+        """返回 Team 生命周期事件发布器。"""
+        ...
+
+    @property
+    def task_middleware(self) -> TeamTaskInvocationMiddleware:
+        """返回包裹每个 Endpoint 调用的中间件。"""
         ...
 
 
@@ -237,11 +299,16 @@ class ResultAggregator(Protocol):
 __all__ = [
     "AgentEndpoint",
     "AgentSelectionPolicy",
+    "PassthroughTeamTaskInvocationMiddleware",
     "ResultAggregator",
     "TaskVerifier",
     "TeamApprovalGate",
     "TeamEventPublisher",
+    "TeamInstrumentation",
     "TeamPlanner",
     "TeamReviewer",
     "TeamRepository",
+    "TeamSnapshotPreparer",
+    "TeamTaskInvocation",
+    "TeamTaskInvocationMiddleware",
 ]

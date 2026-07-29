@@ -11,6 +11,26 @@ from uuid import uuid4
 
 from matterloop_core import IterationRecord, LoopEvent, LoopEventType, PlanStep
 
+from matterloop_observability._semantic_conventions import (
+    ATTR_ATTEMPT,
+    ATTR_CYCLE,
+    ATTR_EXECUTOR,
+    ATTR_FEEDBACK,
+    ATTR_GOAL,
+    ATTR_OPERATION_ID,
+    ATTR_OUTPUT,
+    ATTR_RUN_ID,
+    ATTR_STATUS,
+    ATTR_STEP_DESCRIPTION,
+    ATTR_STEP_ID,
+    ATTR_STEP_INDEX,
+    ATTR_VERIFICATION_PASSED,
+    COMPLETION_EVALUATOR_SPAN_NAME,
+    EXECUTOR_SPAN_NAME,
+    ITERATION_SPAN_NAME,
+    RUN_SPAN_NAME,
+    VERIFIER_SPAN_NAME,
+)
 from matterloop_observability.pipeline import BatchingPipeline
 from matterloop_observability.redaction import Redactor
 from matterloop_observability.scores import score_from_verification
@@ -26,9 +46,6 @@ _TERMINAL_EVENTS = {
     LoopEventType.LOOP_FAILED,
 }
 """标志一次运行结束、需要关闭全部未关跨度的事件。"""
-
-_GOAL_NAME_LIMIT = 80
-"""根跨度名称允许保留的目标摘要长度。"""
 
 
 @dataclass(slots=True)
@@ -141,19 +158,18 @@ class TraceBuilder:
         if state.root is not None:
             return
         goal = event.context.request.goal
-        name = goal[:_GOAL_NAME_LIMIT] if goal.strip() else run_id
         state.root = _OpenSpan(
             trace_id=run_id,
             span_id=uuid4().hex,
             parent_span_id=None,
-            name=name,
+            name=RUN_SPAN_NAME,
             observation_type="chain",
             started_at=event.occurred_at,
             attributes=self._redact(
                 {
-                    "matterloop.run_id": run_id,
-                    "matterloop.goal": goal,
-                    "matterloop.status": event.context.status.value,
+                    ATTR_RUN_ID: run_id,
+                    ATTR_GOAL: goal,
+                    ATTR_STATUS: event.context.status.value,
                 }
             ),
         )
@@ -180,21 +196,19 @@ class TraceBuilder:
             )
         step = self._current_step(event)
         step_id = step.step_id if step is not None else None
-        name = f"executor:{step.executor}" if step is not None else "executor"
-        attributes: dict[str, Any] = {"matterloop.run_id": run_id}
+        attributes: dict[str, Any] = {ATTR_RUN_ID: run_id}
         if step_id is not None:
-            attributes["matterloop.step_id"] = step_id
-            attributes["matterloop.step_description"] = step.description if step else ""
+            attributes[ATTR_STEP_ID] = step_id
+            attributes[ATTR_STEP_DESCRIPTION] = step.description if step else ""
+            attributes[ATTR_EXECUTOR] = step.executor if step else ""
         if event.detail:
-            attributes["matterloop.operation_id"] = event.detail
-        attributes["matterloop.attempt"] = event.context.pending_attempt or (
-            event.context.total_attempts
-        )
+            attributes[ATTR_OPERATION_ID] = event.detail
+        attributes[ATTR_ATTEMPT] = event.context.pending_attempt or (event.context.total_attempts)
         state.executor = _OpenSpan(
             trace_id=run_id,
             span_id=uuid4().hex,
             parent_span_id=state.root.span_id if state.root else None,
-            name=name,
+            name=EXECUTOR_SPAN_NAME,
             observation_type="span",
             started_at=event.occurred_at,
             attributes=self._redact(attributes),
@@ -217,7 +231,7 @@ class TraceBuilder:
         extra: dict[str, Any] = {}
         pending = event.context.pending_execution
         if pending is not None:
-            extra["matterloop.output"] = pending.output
+            extra[ATTR_OUTPUT] = pending.output
         self._emit(
             span.close(
                 event.occurred_at,
@@ -231,14 +245,14 @@ class TraceBuilder:
         """为一次步骤验证打开评估跨度。"""
         step = self._current_step(event)
         step_id = step.step_id if step is not None else None
-        attributes: dict[str, Any] = {"matterloop.run_id": run_id}
+        attributes: dict[str, Any] = {ATTR_RUN_ID: run_id}
         if step_id is not None:
-            attributes["matterloop.step_id"] = step_id
+            attributes[ATTR_STEP_ID] = step_id
         state.evaluator = _OpenSpan(
             trace_id=run_id,
             span_id=uuid4().hex,
             parent_span_id=state.root.span_id if state.root else None,
-            name="verifier",
+            name=VERIFIER_SPAN_NAME,
             observation_type="evaluator",
             started_at=event.occurred_at,
             attributes=self._redact(attributes),
@@ -254,8 +268,8 @@ class TraceBuilder:
             state.evaluator = None
             extra: dict[str, Any] = {}
             if record is not None:
-                extra["matterloop.verification_passed"] = record.verification.passed
-                extra["matterloop.feedback"] = record.verification.feedback
+                extra[ATTR_VERIFICATION_PASSED] = record.verification.passed
+                extra[ATTR_FEEDBACK] = record.verification.feedback
             self._emit(evaluator.close(event.occurred_at, extra_attributes=self._redact(extra)))
         if record is not None:
             self._emit(self._iteration_span(state, run_id, record, event.occurred_at))
@@ -273,20 +287,20 @@ class TraceBuilder:
         """把已完成的迭代证据转换为一个瞬时快照跨度。"""
         attributes = self._redact(
             {
-                "matterloop.run_id": run_id,
-                "matterloop.step_id": record.step.step_id,
-                "matterloop.cycle": record.cycle,
-                "matterloop.step_index": record.step_index,
-                "matterloop.attempt": record.attempt,
-                "matterloop.verification_passed": record.verification.passed,
-                "matterloop.output": record.execution.output,
+                ATTR_RUN_ID: run_id,
+                ATTR_STEP_ID: record.step.step_id,
+                ATTR_CYCLE: record.cycle,
+                ATTR_STEP_INDEX: record.step_index,
+                ATTR_ATTEMPT: record.attempt,
+                ATTR_VERIFICATION_PASSED: record.verification.passed,
+                ATTR_OUTPUT: record.execution.output,
             }
         )
         return _OpenSpan(
             trace_id=run_id,
             span_id=uuid4().hex,
             parent_span_id=state.root.span_id if state.root else None,
-            name=f"iteration:c{record.cycle}:s{record.step_index}",
+            name=ITERATION_SPAN_NAME,
             observation_type="span",
             started_at=moment,
             attributes=attributes,
@@ -299,10 +313,10 @@ class TraceBuilder:
             trace_id=run_id,
             span_id=uuid4().hex,
             parent_span_id=state.root.span_id if state.root else None,
-            name="completion_evaluator",
+            name=COMPLETION_EVALUATOR_SPAN_NAME,
             observation_type="evaluator",
             started_at=event.occurred_at,
-            attributes=self._redact({"matterloop.run_id": run_id}),
+            attributes=self._redact({ATTR_RUN_ID: run_id}),
         )
 
     def _close_role(self, state: _RunTrace, role: str, event: LoopEvent) -> None:

@@ -101,7 +101,7 @@ def test_model_generation_is_nested_in_live_phase() -> None:
     asyncio.run(scenario())
 
     spans = {span.name: span for span in exporter.get_finished_spans()}
-    generation = spans["generation:worker"]
+    generation = spans["matterloop.generation"]
     executor = spans["matterloop.executor"]
     assert generation.parent is not None
     assert generation.parent.span_id == executor.get_span_context().span_id

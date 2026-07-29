@@ -1,7 +1,9 @@
 """JSONL 与 OpenTelemetry 导出器测试。"""
 
+import asyncio
 import importlib
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -174,3 +176,98 @@ def test_otel_exporter_rebuilds_tree_without_writing_sdk_private_state() -> None
     assert root_span.start_time is not None
     assert root_span.end_time is not None
     assert root_span.end_time >= root_span.start_time
+
+
+class _LifecycleProvider:
+    """记录 Provider 生命周期调用及执行线程。"""
+
+    def __init__(self, *, flush_error: Exception | None = None) -> None:
+        self.flush_error = flush_error
+        self.flush_calls = 0
+        self.shutdown_calls = 0
+        self.thread_ids: list[int] = []
+
+    def get_tracer(self, name: str) -> object:
+        del name
+        return object()
+
+    def add_span_processor(self, processor: object) -> None:
+        del processor
+
+    def force_flush(self) -> bool:
+        self.flush_calls += 1
+        self.thread_ids.append(threading.get_ident())
+        if self.flush_error is not None:
+            raise self.flush_error
+        return True
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        self.thread_ids.append(threading.get_ident())
+
+
+async def test_otel_exporter_closes_external_provider_with_one_force_flush() -> None:
+    pytest.importorskip("opentelemetry.sdk.trace")
+    provider = _LifecycleProvider()
+    exporter = OtelExporter(tracer_provider=provider)
+    event_loop_thread = threading.get_ident()
+
+    await asyncio.gather(exporter.aclose(), exporter.aclose())
+    await exporter.aclose()
+
+    assert provider.flush_calls == 1
+    assert provider.shutdown_calls == 0
+    assert provider.thread_ids
+    assert all(thread_id != event_loop_thread for thread_id in provider.thread_ids)
+
+
+async def test_owned_otel_exporter_shuts_down_even_when_flush_fails(monkeypatch) -> None:
+    sdk_trace = pytest.importorskip("opentelemetry.sdk.trace")
+    sdk_resources = pytest.importorskip("opentelemetry.sdk.resources")
+    otlp = pytest.importorskip("opentelemetry.exporter.otlp.proto.http.trace_exporter")
+    provider = _LifecycleProvider(flush_error=RuntimeError("flush failed"))
+    monkeypatch.setattr(sdk_trace, "TracerProvider", lambda resource: provider)
+    monkeypatch.setattr(sdk_resources.Resource, "create", lambda attributes: object())
+    monkeypatch.setattr(otlp, "OTLPSpanExporter", lambda **options: object())
+    exporter = OtelExporter()
+
+    with pytest.raises(RuntimeError, match="flush failed"):
+        await exporter.aclose()
+    with pytest.raises(RuntimeError, match="flush failed"):
+        await exporter.aclose()
+
+    assert provider.flush_calls == 1
+    assert provider.shutdown_calls == 1
+
+
+async def test_otel_close_waits_for_active_export_and_rejects_late_exports() -> None:
+    pytest.importorskip("opentelemetry.sdk.trace")
+    provider = _LifecycleProvider()
+    exporter = OtelExporter(tracer_provider=provider)
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_export(trace_id: str) -> None:
+        started.set()
+        assert release.wait(timeout=2)
+        exporter._pending.pop(trace_id, None)
+
+    exporter._export_trace = blocking_export  # type: ignore[method-assign]
+    root = _span(trace_id="run-closing")
+    export_task = asyncio.create_task(asyncio.to_thread(exporter.export, [root]))
+    assert await asyncio.to_thread(started.wait, 2)
+    close_task = asyncio.create_task(exporter.aclose())
+    for _ in range(1000):
+        if exporter._close_state == "closing":
+            break
+        await asyncio.sleep(0.001)
+
+    assert exporter._close_state == "closing"
+    assert provider.flush_calls == 0
+    release.set()
+    await export_task
+    await close_task
+
+    assert provider.flush_calls == 1
+    with pytest.raises(RuntimeError, match="closing or already closed"):
+        exporter.export([root])

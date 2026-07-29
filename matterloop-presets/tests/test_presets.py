@@ -9,6 +9,23 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
+from matterloop_agents.collaboration import (
+    AgentDirectory,
+    AgentSpec,
+    AlwaysApproveTeamGate,
+    ConcatenateResultAggregator,
+    InMemoryTeamRepository,
+    LeastBusyScheduler,
+    LocalTeamEventPublisher,
+    LoopAgentEndpoint,
+    ResultSuccessVerifier,
+    StaticTeamPlanner,
+    TaskSpec,
+    TeamOrchestrator,
+    TeamOrchestratorComponents,
+    TeamRequest,
+    TeamStatus,
+)
 from matterloop_core import (
     ApprovalDecision,
     ArtifactRef,
@@ -58,7 +75,7 @@ from matterloop_runtime import (
     LocalRuntime,
     RunStatus,
 )
-from matterloop_tools import ToolContext, ToolPermissionDeniedError
+from matterloop_tools import ToolContext, ToolPermissionDeniedError, ToolResult, ToolSpec
 
 
 def _plan_response(
@@ -108,6 +125,33 @@ def _simple_success_model(*, evidence: tuple[str, ...] = ("artifact://result",))
             _plan_response(),
             ModelResponse(output_text="执行完成"),
             _verification_response(evidence=evidence),
+        )
+    )
+
+
+class _ProductionEchoTool:
+    """生产预设实时 tracing 联调用的确定性工具。"""
+
+    spec = ToolSpec("echo", "回显文本", {"type": "object"})
+
+    async def invoke(
+        self,
+        arguments: Mapping[str, object],
+        context: ToolContext,
+    ) -> ToolResult:
+        return ToolResult(f"{context.run_id}:{arguments['text']}")
+
+
+def _tool_success_model() -> FakeModelClient:
+    return FakeModelClient(
+        (
+            _plan_response(),
+            ModelResponse(
+                tool_calls=(ToolCall("call-production", "echo", {"text": "hello"}),),
+                response_id="worker-tool-response",
+            ),
+            ModelResponse(output_text="工具执行完成"),
+            _verification_response(),
         )
     )
 
@@ -473,14 +517,36 @@ def test_production_runtime_uses_live_context_for_otel_exporter() -> None:
     memory = in_memory.InMemorySpanExporter()
     provider.add_span_processor(sdk_export.SimpleSpanProcessor(memory))
 
+    class RecordingProvider:
+        def __init__(self, delegate: object) -> None:
+            self.delegate = delegate
+            self.flush_calls = 0
+            self.shutdown_calls = 0
+
+        def get_tracer(self, *args: object, **kwargs: object) -> object:
+            return self.delegate.get_tracer(*args, **kwargs)  # type: ignore[attr-defined,no-any-return]
+
+        def force_flush(self) -> bool:
+            self.flush_calls += 1
+            return self.delegate.force_flush()  # type: ignore[attr-defined,no-any-return]
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            self.delegate.shutdown()  # type: ignore[attr-defined]
+
+    recording_provider = RecordingProvider(provider)
+
     async def scenario() -> None:
         runtime = build_production_runtime(
-            _simple_success_model(),
+            _tool_success_model(),
             queue_backend=InMemoryQueueBackend(),
             run_repository=InMemoryRunRepository(),
             checkpoint_store=InMemoryCheckpointStore(),
             audit_publisher=_NoopPublisher(),
-            trace_exporter=OtelExporter(tracer_provider=provider),
+            trace_exporter=OtelExporter(tracer_provider=recording_provider),
+            tools=(_ProductionEchoTool(),),
+            capture_tool_payloads=True,
+            capture_max_body_bytes=12,
         )
         try:
             result = await runtime.worker_runtime.run(LoopRequest("worker"), run_id="worker-otel-1")
@@ -490,17 +556,90 @@ def test_production_runtime_uses_live_context_for_otel_exporter() -> None:
 
     asyncio.run(scenario())
 
-    spans = {span.name: span for span in memory.get_finished_spans()}
+    finished = memory.get_finished_spans()
+    spans = {span.name: span for span in finished if span.name != "matterloop.generation"}
     root = spans["matterloop.run"]
-    generation = spans["generation:worker"]
+    generation = next(
+        span
+        for span in finished
+        if span.name == "matterloop.generation"
+        and span.attributes.get("matterloop.agent") == "worker"
+    )
     executor = spans["matterloop.executor"]
+    tool = spans["matterloop.tool"]
     verifier = spans["matterloop.verifier"]
     score = spans["score:verification"]
     assert generation.parent is not None
     assert generation.parent.span_id == executor.get_span_context().span_id
     assert generation.get_span_context().trace_id == root.get_span_context().trace_id
+    assert tool.parent is not None
+    assert tool.parent.span_id == executor.get_span_context().span_id
+    assert tool.attributes["matterloop.tool_call_id"] == "call-production"
+    assert tool.attributes["matterloop.tool.name"] == "echo"
+    assert tool.attributes["matterloop.tool.arguments"] == '{"text":"hel'
+    assert tool.attributes["matterloop.tool.result"] == "worker-otel-"
+    assert tool.attributes["matterloop.tool.arguments_truncated"] is True
+    assert tool.attributes["matterloop.tool.result_truncated"] is True
     assert score.parent is not None
     assert score.parent.span_id == verifier.get_span_context().span_id
+    assert recording_provider.flush_calls == 1
+    assert recording_provider.shutdown_calls == 0
+
+
+def test_production_otel_runtime_automatically_instruments_team_endpoint() -> None:
+    """子 Runtime 已启用 OTel 时，Team 控制器无需再次手工注入 tracing。"""
+    sdk_trace = pytest.importorskip("opentelemetry.sdk.trace")
+    sdk_export = pytest.importorskip("opentelemetry.sdk.trace.export")
+    in_memory = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
+    provider = sdk_trace.TracerProvider()
+    memory = in_memory.InMemorySpanExporter()
+    provider.add_span_processor(sdk_export.SimpleSpanProcessor(memory))
+
+    async def scenario() -> None:
+        child = build_production_runtime(
+            _simple_success_model(),
+            queue_backend=InMemoryQueueBackend(),
+            run_repository=InMemoryRunRepository(),
+            checkpoint_store=InMemoryCheckpointStore(),
+            audit_publisher=_NoopPublisher(),
+            trace_exporter=OtelExporter(tracer_provider=provider),
+        )
+        directory = AgentDirectory()
+        directory.register(
+            LoopAgentEndpoint(
+                AgentSpec("child", frozenset({"analysis"})),
+                child.worker_runtime,
+            )
+        )
+        team = TeamOrchestrator(
+            TeamOrchestratorComponents(
+                planner=StaticTeamPlanner((TaskSpec("task", "分析任务", "analysis"),)),
+                agents=directory,
+                selection_policy=LeastBusyScheduler(),
+                verifier=ResultSuccessVerifier(),
+                approval_gate=AlwaysApproveTeamGate(),
+                repository=InMemoryTeamRepository(),
+                events=LocalTeamEventPublisher(),
+                aggregator=ConcatenateResultAggregator(),
+            )
+        )
+        try:
+            result = await team.run(TeamRequest("自动追踪团队"), run_id="team-auto-otel")
+            assert result.status is TeamStatus.COMPLETED
+        finally:
+            await child.aclose()
+
+    asyncio.run(scenario())
+
+    finished = memory.get_finished_spans()
+    team = next(span for span in finished if span.name == "matterloop.team")
+    agent = next(span for span in finished if span.name == "matterloop.team.agent")
+    child_run = next(span for span in finished if span.name == "matterloop.run")
+    assert agent.parent is not None
+    assert agent.parent.span_id == team.get_span_context().span_id
+    assert child_run.parent is not None
+    assert child_run.parent.span_id == agent.get_span_context().span_id
+    assert child_run.get_span_context().trace_id == team.get_span_context().trace_id
 
 
 def test_production_runtime_without_exporter_keeps_event_pipeline_unchanged() -> None:
@@ -516,11 +655,149 @@ def test_production_runtime_without_exporter_keeps_event_pipeline_unchanged() ->
             audit_publisher=audit,
         )
         result = await runtime.worker_runtime.run(LoopRequest("worker"), run_id="worker-plain-1")
+        assert runtime.worker_runtime.team_instrumentation is None
         await runtime.aclose()
 
         assert result.status is LoopStatus.COMPLETED
 
     asyncio.run(scenario())
+
+
+def test_production_runtime_closes_tools_and_model_before_flushing_otel() -> None:
+    """遥测 sink 必须最后关闭，才能接收工具和模型关闭期间产生的 Span。"""
+    sdk_trace = pytest.importorskip("opentelemetry.sdk.trace")
+    events: list[str] = []
+
+    class ClosingModel(FakeModelClient):
+        async def aclose(self) -> None:
+            events.append("model")
+
+    class ClosingTool:
+        spec = ToolSpec("closing", "关闭顺序测试", {"type": "object"})
+
+        async def invoke(
+            self,
+            arguments: Mapping[str, object],
+            context: ToolContext,
+        ) -> ToolResult:
+            del arguments, context
+            return ToolResult("ok")
+
+        async def aclose(self) -> None:
+            events.append("tool")
+
+    provider = sdk_trace.TracerProvider()
+
+    class RecordingProvider:
+        def get_tracer(self, *args: object, **kwargs: object) -> object:
+            return provider.get_tracer(*args, **kwargs)
+
+        def force_flush(self) -> bool:
+            events.append("flush")
+            return provider.force_flush()
+
+        def shutdown(self) -> None:
+            events.append("shutdown")
+            provider.shutdown()
+
+    async def scenario() -> None:
+        runtime = build_production_runtime(
+            ClosingModel(),
+            queue_backend=InMemoryQueueBackend(),
+            run_repository=InMemoryRunRepository(),
+            checkpoint_store=InMemoryCheckpointStore(),
+            audit_publisher=_NoopPublisher(),
+            trace_exporter=OtelExporter(tracer_provider=RecordingProvider()),
+            tools=(ClosingTool(),),
+        )
+        await runtime.aclose()
+
+    asyncio.run(scenario())
+
+    assert events == ["tool", "model", "flush"]
+
+
+def test_production_runtime_drains_slow_tool_before_flushing_otel() -> None:
+    """关闭运行时必须等待在途工具的 Span 结束，随后才能 flush Provider。"""
+    sdk_trace = pytest.importorskip("opentelemetry.sdk.trace")
+    sdk_export = pytest.importorskip("opentelemetry.sdk.trace.export")
+    in_memory = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
+    provider = sdk_trace.TracerProvider()
+    memory = in_memory.InMemorySpanExporter()
+    provider.add_span_processor(sdk_export.SimpleSpanProcessor(memory))
+    events: list[str] = []
+
+    class RecordingProvider:
+        def get_tracer(self, *args: object, **kwargs: object) -> object:
+            return provider.get_tracer(*args, **kwargs)  # type: ignore[attr-defined,no-any-return]
+
+        def force_flush(self) -> bool:
+            events.append("flush")
+            assert any(span.name == "matterloop.tool" for span in memory.get_finished_spans())
+            return provider.force_flush()
+
+        def shutdown(self) -> None:
+            provider.shutdown()
+
+    class SlowEchoTool:
+        spec = ToolSpec("echo", "慢回显", {"type": "object"})
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.closed = False
+
+        async def invoke(
+            self,
+            arguments: Mapping[str, object],
+            context: ToolContext,
+        ) -> ToolResult:
+            self.started.set()
+            await self.release.wait()
+            events.append("tool-finished")
+            return ToolResult(f"{context.run_id}:{arguments['text']}")
+
+        async def aclose(self) -> None:
+            self.closed = True
+            events.append("tool-closed")
+
+    async def scenario() -> None:
+        tool = SlowEchoTool()
+        runtime = build_production_runtime(
+            _tool_success_model(),
+            queue_backend=InMemoryQueueBackend(),
+            run_repository=InMemoryRunRepository(),
+            checkpoint_store=InMemoryCheckpointStore(),
+            audit_publisher=_NoopPublisher(),
+            trace_exporter=OtelExporter(tracer_provider=RecordingProvider()),
+            tools=(tool,),
+        )
+        running = asyncio.create_task(
+            runtime.worker_runtime.run(LoopRequest("worker"), run_id="worker-slow-tool")
+        )
+        await tool.started.wait()
+        closing = asyncio.create_task(runtime.aclose())
+        await asyncio.sleep(0)
+
+        assert not closing.done()
+        assert not tool.closed
+        assert "flush" not in events
+
+        tool.release.set()
+        result = await running
+        await closing
+
+        assert result.status is LoopStatus.COMPLETED
+        assert tool.closed
+
+    asyncio.run(scenario())
+
+    tool_span = next(span for span in memory.get_finished_spans() if span.name == "matterloop.tool")
+    assert "matterloop.tool.arguments" not in tool_span.attributes
+    assert "matterloop.tool.result" not in tool_span.attributes
+    assert tool_span.attributes["matterloop.tool.arguments_bytes"] > 0
+    assert tool_span.attributes["matterloop.tool.result_bytes"] > 0
+    assert events == ["tool-finished", "tool-closed", "flush"]
 
 
 def test_all_local_builders_return_closable_sync_facades(tmp_path: Path) -> None:

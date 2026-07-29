@@ -7,6 +7,27 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-29
+
+### Added
+
+- Observability 新增 `OpenTelemetryToolMiddleware`，自动记录 Tool、Skill 和 MCP 调用；默认只记录
+  载荷大小、SHA-256 和白名单语义属性。只有显式设置 `capture_tool_payloads=True` 才按原文采集有界
+  载荷（默认 4096 字节，可通过 `capture_max_body_bytes` 覆盖）。production preset 支持显式
+  `tools`/`tool_authorizer` 注入。
+- Observability 新增 Team/子 Agent 实时 OTel 拓扑；Team 快照持久化 W3C carrier，暂停、阻塞和
+  跨进程恢复仍保持 `matterloop.team -> matterloop.team.agent -> matterloop.run` 父子关系。
+
+### Changed
+
+- Checkpoint schema v2 同时包含 `propagation_context` 与 `external_state_refs`，并兼容读取旧的
+  无版本 v1。
+- Trace Span 名称统一为固定的 `matterloop.*` 语义，动态 agent/executor 信息改为属性；
+  `OtelExporter.aclose()` 会 force-flush，并只 shutdown 自己创建的 Provider。
+  这是观测 schema 的不兼容变更；现有 dashboard、告警和查询必须迁移到新的固定 Span 名称。
+- Runtime 关闭会先 drain 在途 Loop 和工具调用，再关闭工具、模型与 exporter，避免已结束 Provider
+  漏掉晚结束的 `matterloop.tool` Span。
+
 ## [0.2.0] - 2026-07-28
 
 ### Added
@@ -89,7 +110,9 @@
 - 模型 continuation/reasoning 不进入公开结果，日志与事件支持敏感字段脱敏。
 - Shell 工具使用 argv 调用，文件与 HTTP 工具提供路径、协议、host 和响应大小边界。
 
-[Unreleased]: https://github.com/huleidada/matterloop/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/huleidada/matterloop/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/huleidada/matterloop/releases/tag/v0.2.1
+[0.2.0]: https://github.com/huleidada/matterloop/releases/tag/v0.2.0
 [0.1.2]: https://github.com/huleidada/matterloop/releases/tag/v0.1.2
 [0.1.1]: https://github.com/huleidada/matterloop/releases/tag/v0.1.1
 [0.1.0]: https://github.com/huleidada/matterloop/releases/tag/v0.1.0

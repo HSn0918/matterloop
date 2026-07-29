@@ -15,7 +15,11 @@ from matterloop_agents.collaboration.errors import (
     NoCapableAgentError,
 )
 from matterloop_agents.collaboration.models import AgentSpec, TaskSpec
-from matterloop_agents.collaboration.protocols import AgentEndpoint, AgentSelectionPolicy
+from matterloop_agents.collaboration.protocols import (
+    AgentEndpoint,
+    AgentSelectionPolicy,
+    TeamInstrumentation,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +126,21 @@ class AgentDirectory:
         """返回按 ``agent_id`` 稳定排序的 Agent 发现快照。"""
         with self._lock:
             return tuple(slot.spec for _, slot in sorted(self._slots.items()) if slot.registered)
+
+    def team_instrumentation(self) -> TeamInstrumentation | None:
+        """返回已注册 Endpoint 暴露的第一套稳定 Team 观测能力。
+
+        目录按 ``agent_id`` 排序选择，因此多套 Provider 并存时行为仍然确定。选中的
+        中间件会生成标准 W3C 载体，其他 Provider 上的远端子 Runtime 可继续恢复该父节点。
+        """
+        with self._lock:
+            for _, slot in sorted(self._slots.items()):
+                if not slot.registered:
+                    continue
+                candidate = getattr(slot.endpoint, "team_instrumentation", None)
+                if isinstance(candidate, TeamInstrumentation):
+                    return candidate
+        return None
 
     @asynccontextmanager
     async def acquire(

@@ -86,6 +86,11 @@ class Tool(Protocol):
 若不显式声明 effect，会以 `UNKNOWN` 处理并被只读上下文拒绝。`effect_for(arguments)` 可用于目录、
 审计和测试，但最终判定始终由 `ToolRegistry.invoke()` 执行。
 
+`ToolInvocationMiddleware.invoke(tool_name, arguments, context, call_next)` 是不依赖追踪 SDK 的结构协议。
+注册表在参数快照之后、工具查找和权限判断之前调用它，所以成功、缺失和拒绝都处于同一个边界内；
+默认 `PassthroughToolInvocationMiddleware` 直接调用下一层。OTel 实现在
+`matterloop-observability`，tools 包不会反向依赖 observability。
+
 Schema 用于发现，不代表注册表会自动执行 JSON Schema。自定义工具必须在本地校验全部参数；模型
 侧的 strict tools 也不能替代授权。
 

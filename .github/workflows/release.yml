@@ -1,0 +1,92 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag and dispatch the release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the merged source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Resolve and validate the release version
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          version="$(uv version --short)"
+          tag="v${version}"
+          uv run --locked python scripts/check_release.py \
+            --expected-version "${version}" \
+            --tag "${tag}"
+          previous_tag=""
+          while IFS= read -r candidate; do
+            if [[ "${candidate}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              previous_tag="${candidate}"
+              break
+            fi
+          done < <(git tag --list "v*.*.*" --sort=-v:refname)
+          if test -n "${previous_tag}"; then
+            previous_version="${previous_tag#v}"
+            IFS=. read -r previous_major previous_minor previous_patch <<< "${previous_version}"
+            IFS=. read -r current_major current_minor current_patch <<< "${version}"
+            expected_patch="$((previous_patch + 1))"
+            if test "${current_major}" != "${previous_major}" \
+              || test "${current_minor}" != "${previous_minor}" \
+              || test "${current_patch}" != "${expected_patch}"; then
+              echo "版本必须在 ${previous_tag} 基础上只递增补丁位；期望 v${previous_major}.${previous_minor}.${expected_patch}，实际为 ${tag}。" >&2
+              exit 1
+            fi
+          fi
+          {
+            echo "version=${version}"
+            echo "tag=${tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Create the release tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}" >/dev/null; then
+            tagged_sha="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+            if test "${tagged_sha}" != "${GITHUB_SHA}"; then
+              echo "${RELEASE_TAG} 已指向 ${tagged_sha}；请先更新项目版本再合并。" >&2
+              exit 1
+            fi
+            echo "${RELEASE_TAG} 已指向当前提交，继续执行发布。"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "${RELEASE_TAG}" --message "Release ${RELEASE_TAG}"
+          git push origin "refs/tags/${RELEASE_TAG}"
+
+      - name: Dispatch the PyPI publishing workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: gh workflow run publish.yml --ref "${RELEASE_TAG}"

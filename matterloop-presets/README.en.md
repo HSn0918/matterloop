@@ -109,9 +109,17 @@ dead letters, and the Worker loop.
 attaches a `TraceBuilder` to the audit event pipeline, wraps the model client in a
 `TracedModelClient`, and drains the export pipeline on `ProductionRuntime.aclose()`. With an
 `OtelExporter` given a shared `TracerProvider`, the preset instead uses real-time OTel Context:
-`matterloop.run`, each execution phase, generation, and SQLAlchemy/HTTP auto-instrumentation spans
-are in the same trace. Provider creation, global registration, and shutdown remain the
-application's responsibility; see the [database configuration](../matterloop-observability/README.en.md#production-one-live-otel-trace-with-the-database).
+`matterloop.run`, each execution phase, `matterloop.generation`, `matterloop.tool`, and
+SQLAlchemy/HTTP auto-instrumentation spans are in the same trace. Registering that `worker_runtime`
+as a child Agent through `LoopAgentEndpoint` also lets the Team controller reuse the Provider and
+add `matterloop.team` and `matterloop.team.agent` automatically. Use `tools=` for the default
+executor's explicit tool allowlist and `tool_authorizer=` for authorization. Tool payloads are not captured
+verbatim by default: only size and SHA-256 are recorded. Pass `capture_tool_payloads=True` to enable
+verbatim capture (4096-byte default limit, configurable with `capture_max_body_bytes=`). Runtime close
+waits for in-flight runs and tool calls before force-flushing a shared Provider; Provider creation, global
+registration, and final
+shutdown remain the application's responsibility. See the
+[database configuration](../matterloop-observability/README.en.md#production-one-live-otel-trace-with-the-database).
 A blocked or paused Loop persists W3C `traceparent`/`tracestate` in the same checkpoint CAS; resumption
 creates a real child Span without deriving IDs from `run_id` or inventing a synthetic parent. W3C baggage
 is not written to the checkpoint.

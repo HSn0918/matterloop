@@ -98,13 +98,14 @@ def test_trace_builder_rebuilds_span_tree_and_extracts_score() -> None:
         spans = _spans(exporter)
         assert {span.trace_id for span in spans} == {"run-1"}
         root = next(span for span in spans if span.parent_span_id is None)
-        assert root.name == "构建演示目标"
+        assert root.name == "matterloop.run"
         assert root.observation_type == "chain"
         assert root.attributes["matterloop.goal"] == "构建演示目标"
 
-        executor = next(span for span in spans if span.name == "executor:coder")
+        executor = next(span for span in spans if span.name == "matterloop.executor")
         assert executor.parent_span_id == root.span_id
         assert executor.attributes["matterloop.step_id"] == "step-1"
+        assert executor.attributes["matterloop.executor"] == "coder"
         assert executor.attributes["matterloop.operation_id"] == "op-1"
         assert executor.attributes["matterloop.output"] == "执行输出"
 
@@ -113,7 +114,7 @@ def test_trace_builder_rebuilds_span_tree_and_extracts_score() -> None:
         assert evaluator.attributes["matterloop.verification_passed"] is True
         assert evaluator.started_at <= evaluator.ended_at
 
-        iteration = next(span for span in spans if span.name == "iteration:c1:s0")
+        iteration = next(span for span in spans if span.name == "matterloop.iteration")
         assert iteration.parent_span_id == root.span_id
         assert iteration.attributes["matterloop.cycle"] == 1
         assert iteration.attributes["matterloop.attempt"] == 1
@@ -188,7 +189,7 @@ def test_loop_failed_marks_error_and_force_closes_open_spans() -> None:
         assert root.level == "ERROR"
         assert root.status_message == "RuntimeError: executor crashed"
 
-        executor = next(span for span in spans if span.name == "executor:coder")
+        executor = next(span for span in spans if span.name == "matterloop.executor")
         assert executor.level == "ERROR"
         assert executor.status_message is not None
         assert "强制关闭" in executor.status_message
@@ -211,7 +212,7 @@ def test_retry_closes_each_executor_attempt_before_the_next_dispatch() -> None:
         builder.handle(LoopEvent(LoopEventType.LOOP_FAILED, context))
         pipeline.flush()
 
-        executor_spans = [span for span in _spans(exporter) if span.name == "executor:coder"]
+        executor_spans = [span for span in _spans(exporter) if span.name == "matterloop.executor"]
         assert len(executor_spans) == 2
         assert [span.attributes["matterloop.attempt"] for span in executor_spans] == [1, 2]
         assert executor_spans[0].level == "ERROR"

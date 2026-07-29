@@ -2,12 +2,15 @@
 
 from matterloop_tools.base import (
     AllowAllToolAuthorizer,
+    PassthroughToolInvocationMiddleware,
     PermissionDecision,
     Tool,
     ToolAccessScope,
     ToolAuthorizer,
     ToolContext,
     ToolEffect,
+    ToolInvocation,
+    ToolInvocationMiddleware,
     ToolResult,
     ToolSpec,
 )
@@ -161,6 +164,7 @@ __all__ = [
     "McpToolNameCollisionError",
     "McpToolPage",
     "McpTransportError",
+    "PassthroughToolInvocationMiddleware",
     "PermissionDecision",
     "Principal",
     "QuotaExceededError",
@@ -200,6 +204,8 @@ __all__ = [
     "ToolEffect",
     "ToolError",
     "ToolInputError",
+    "ToolInvocation",
+    "ToolInvocationMiddleware",
     "ToolNotFoundError",
     "ToolPermissionDeniedError",
     "ToolPolicy",

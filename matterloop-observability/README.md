@@ -126,7 +126,8 @@ events = CompositeEventPublisher(
 如果应用还要为 SQLAlchemy、HTTP 客户端或消息队列做 OTel 自动埋点，最佳实践是**由应用只创建一个
 `TracerProvider`**：先把它设置为全局 Provider，再把同一实例传给 `OtelExporter`。production preset
 识别到 `OtelExporter` 后，会在 Loop 执行时实时创建 `matterloop.run`、Planner/Executor/Verifier 和
-generation Span；自动 instrumentation 产生的数据库/HTTP Span 会继承当前阶段，成为同一 Trace 的子节点。
+`matterloop.generation` Span；工具调用还会创建 `matterloop.tool`。自动 instrumentation 产生的
+数据库/HTTP Span 会继承当前阶段，成为同一 Trace 的子节点。
 阻塞或暂停前，实时发布器会把当前 `matterloop.run` 的标准 W3C `traceparent`/`tracestate` 写入同一次
 checkpoint CAS。恢复时从这个上下文创建新的真实子 Span：人工等待不计入执行时长，跨进程恢复仍在同一条
 Trace 中，并且后端能找到已导出的真实父节点。checkpoint 只保存 `traceparent`/`tracestate`，不会持久化
@@ -165,13 +166,31 @@ runtime = build_production_runtime(
     checkpoint_store=checkpoint_store,
     audit_publisher=audit_publisher,
     trace_exporter=OtelExporter(tracer_provider=provider),
+    tools=production_tools,
 )
 ```
 
-应用关闭时先 `await runtime.aclose()`，再由应用对它拥有的 Provider 执行 `provider.force_flush()` 和
-`provider.shutdown()`。不要把 `OtelExporter(endpoint=...)` 自行创建的内部 Provider 用于数据库自动埋点：
+`await runtime.aclose()` 会对共享 Provider 执行 `force_flush()`，但不会关闭它；随后由应用对自己拥有的
+Provider 执行 `provider.shutdown()`。不要把 `OtelExporter(endpoint=...)` 自行创建的内部 Provider 用于
+数据库自动埋点：
 它没有注册成全局 Provider，数据库 Span 会落到另一条 Trace（或被默认 no-op Provider 丢弃）；production
-preset 会为这种配置记录警告，内部 Provider 的关闭也仍由调用方管理。
+preset 会为这种配置记录警告，并在 runtime 关闭时 flush 和 shutdown 这个内部 Provider。
+
+## 工具调用跨度
+
+`OpenTelemetryToolMiddleware(provider)` 通过 `ToolRegistry(middleware=...)`
+记录工具查找、权限判断和真实执行，因此成功、`ToolResult.is_error`、权限拒绝、工具不存在和异常都有
+`matterloop.tool` Span。Worker 会把模型已有的 `ToolCall.call_id` 透传为
+`matterloop.tool_call_id`；直接调用缺少 ID 时中间件才生成新的 UUID。
+
+默认不会把参数、自由文本结果或 Skill 正文写入 Trace；arguments/result 仅记录 UTF-8 字节数与 SHA-256。
+显式设置 `capture_tool_payloads=True` 后，才会按原文记录每项最多 4096 个 UTF-8 字节的预览，并可用
+`capture_max_body_bytes` 调整。该开关会把凭据、PII 或不可信内容交给 Trace 后端，必须仅在访问控制和
+保留策略已就绪时开启。Skill 的 name/version/operation/sha256/trust 和 MCP 的
+server/tool/content_blocks/truncated 来自白名单元数据；不会把任意 `ToolResult.metadata` 整体写入 Span，
+也不会把普通 Tool 的 `truncated` 写成 MCP 属性。production preset 传入 `OtelExporter` 时自动安装该
+middleware，并通过 `tools=` 显式声明默认执行器的工具 allowlist。runtime 关闭会先等待在途 Loop 和工具调用
+结束，再 flush Provider。
 
 ## 模型调用跨度
 
@@ -182,7 +201,8 @@ client = wrap_model_client(model_client, trace_builder)
 ```
 
 `TracedModelClient(client, trace_builder, pipeline)` 可包装任意 `ModelClient`：请求 metadata 含
-`run_id` 时记录一个 generation 跨度，内容包含脱敏后的输入消息、采样参数、输出文本和六项 Token
+`run_id` 时记录一个固定名为 `matterloop.generation` 的跨度，内容包含脱敏后的输入消息、采样参数、
+输出文本和六项 Token
 用量，父跨度由 `trace_builder` 按 `run_id`/`step_id` 解析，解析不到时挂到运行根跨度；metadata
 缺少 `run_id` 时直接透传，观测永远不会阻断调用。模型异常会记录 ERROR 跨度并原样继续抛出。
 agents 组件的 Planner、Worker、Verifier 和 Reviewer 已在请求 metadata 中写入 `run_id`、`step_id`
@@ -197,5 +217,44 @@ agents 组件的 Planner、Worker、Verifier 和 Reviewer 已在请求 metadata 
 `BatchingPipeline` 提供；需要自定义事件去向时，直接实现 Core `EventPublisher.publish(event)`，
 在实现内部管理有界队列和关闭流程。
 
-本包当前面向 Core `LoopEvent`。TeamLoop 事件的数据结构不同，需要单独适配，不能把团队事件发布器
-直接塞给这些处理器。生产拓扑和关闭顺序见[企业集成指南](../docs/enterprise-integration.md)。
+## TeamLoop 与子 Agent Span
+
+当 `LoopAgentEndpoint` 使用由 `build_production_runtime(..., trace_exporter=OtelExporter(...))`
+创建的 `worker_runtime` 时，Team tracing 会自动加载，无需再次订阅事件或配置 `task_middleware`。
+Runtime 会复用同一个 `TracerProvider`，生成
+`matterloop.team -> matterloop.team.agent -> matterloop.run`，再继续嵌套子 Loop 的
+phase/generation/tool Span。
+
+```python
+from matterloop_agents.collaboration import LoopAgentEndpoint, TeamOrchestratorComponents
+
+directory.register(LoopAgentEndpoint(agent_spec, production_runtime.worker_runtime))
+
+components = TeamOrchestratorComponents(
+    # planner, agents, selection_policy, verifier, approval_gate, repository, aggregator ...
+    events=team_events,
+)
+```
+
+自动发现发生在 `TeamOrchestrator` 构造时，因此应先注册 Endpoint、再构造控制器。多个子 Runtime
+应共享应用的 Provider；若存在多套 Provider，控制器按 `agent_id` 稳定选择第一套记录 Team/Agent
+Span，其余远端子 Runtime 仍通过 W3C 载体恢复父节点。自定义 Runtime 未暴露该能力时，仍可显式使用
+`OpenTelemetryTeamTracePublisher` 和 `OpenTelemetryTeamTaskMiddleware`；显式
+`task_middleware` 会覆盖自动配置，避免重复 Span。此时还应把同一个
+`OpenTelemetryTeamTracePublisher` 传给 `snapshot_preparer`，确保 Team 根 Span 的 W3C carrier
+与 Team 快照同次 CAS 保存。
+
+Team 事件发布器不会把根 Span 长期 attach 到事件发布 task；每个子 Agent Span 都从快照中的 carrier
+显式恢复父节点，因此 timeout 创建的 task、取消 shield 和远端执行不会跨 task 解绑 ContextVar token。
+暂停或阻塞会先保存 carrier 再结束当前 Team segment；另一个进程 resume 时以该 carrier 创建真实子
+segment，整次协作仍保持同一 Trace。
+
+Team Span 默认只写 `team_run_id`、状态、停止原因、task/agent/attempt 与结果状态；不会写 Team
+goal、任务描述、输出、人工反馈、异常消息或任意 metadata。中间件只向子 Endpoint 传递标准 W3C
+`traceparent`/`tracestate`，不传递 baggage。`LoopAgentEndpoint` 将该载体置于子 `LoopRequest.metadata`
+的 `propagation_context`；相同进程的 asyncio 调用天然继承当前上下文，远端 runtime 则须原样转发该
+metadata，并在其子 Loop 中使用 `OpenTelemetryTracePublisher` 以恢复真实父节点。
+
+`AsyncTeamRuntime.aclose()` 会先拒绝新 Team 调用并等待在途 `run`、`resume`、人工响应操作结束，随后
+才按逆序关闭资源；因此把 child runtime/exporter 放入其 `resources` 后，不会在子 Agent Span 结束前
+提前 flush/shutdown Provider。生产拓扑和关闭顺序见[企业集成指南](../docs/enterprise-integration.md)。

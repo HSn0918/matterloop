@@ -203,9 +203,10 @@ Core 先 CAS 保存 checkpoint，再发布带连续 sequence 的事件。这样�
 OpenTelemetry 的 Provider、Exporter、采样与资源属性应由应用统一配置。若同时给数据库、HTTP 或消息
 客户端加自动 instrumentation，创建一个共享 `TracerProvider`，先用 `trace.set_tracer_provider(provider)`
 注册它，再通过 `OtelExporter(tracer_provider=provider)` 传给 production preset。这样 MatterLoop 运行、
-模型 generation 与数据库/HTTP Span 会在同一条实时 Trace 中；不要使用 `OtelExporter(endpoint=...)` 自动
-创建的内部 Provider 做跨组件追踪。关闭顺序是 `runtime.aclose()`、`provider.force_flush()`、
-`provider.shutdown()`。Team 事件会携带完整 Snapshot，写入 SIEM 或 Trace 前要评估体积、基数与敏感字段。
+模型 generation、工具调用与数据库/HTTP Span 会在同一条实时 Trace 中；不要使用
+`OtelExporter(endpoint=...)` 自动创建的内部 Provider 做跨组件追踪。`runtime.aclose()` 会先关闭工具和
+模型，再 force-flush 共享 Provider；应用随后执行 `provider.shutdown()`。Team 事件会携带完整 Snapshot，
+写入 SIEM 或 Trace 前要评估体积、基数与敏感字段。
 
 需要离线树形 Trace 时，用 `TraceBuilder` 搭配 `BatchingPipeline` 把事件流重建为跨度树并提取验证评分，
 模型客户端用 `TracedModelClient` 包装后自动记录 generation 跨度；production preset 传入普通

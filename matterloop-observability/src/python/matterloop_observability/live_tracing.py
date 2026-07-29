@@ -4,12 +4,35 @@ from __future__ import annotations
 
 import importlib
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from matterloop_core import LoopContext, LoopEvent, LoopEventType
 
+from matterloop_observability._semantic_conventions import (
+    ATTR_EXECUTOR,
+    ATTR_FEEDBACK,
+    ATTR_GOAL,
+    ATTR_OPERATION_ID,
+    ATTR_OUTPUT,
+    ATTR_RUN_ID,
+    ATTR_SCORE_NAME,
+    ATTR_SCORE_RAW_VALUE,
+    ATTR_SCORE_SOURCE,
+    ATTR_SCORE_VALUE,
+    ATTR_STATUS,
+    ATTR_STEP_ID,
+    ATTR_VERIFICATION_PASSED,
+    COMPLETION_EVALUATOR_SPAN_NAME,
+    EXECUTOR_SPAN_NAME,
+    INSTRUMENTATION_SCOPE,
+    PLANNER_SPAN_NAME,
+    RUN_SPAN_NAME,
+    VERIFICATION_SCORE_SPAN_NAME,
+    VERIFIER_SPAN_NAME,
+)
 from matterloop_observability.redaction import Redactor
 
 logger = logging.getLogger(__name__)
@@ -22,6 +45,13 @@ _TERMINAL_EVENTS = {
 }
 
 _SUSPENSION_EVENTS = {LoopEventType.LOOP_BLOCKED, LoopEventType.LOOP_PAUSED}
+
+_PHASE_SPAN_NAMES = {
+    "planner": PLANNER_SPAN_NAME,
+    "executor": EXECUTOR_SPAN_NAME,
+    "verifier": VERIFIER_SPAN_NAME,
+    "completion_evaluator": COMPLETION_EVALUATOR_SPAN_NAME,
+}
 
 
 @dataclass(slots=True)
@@ -62,7 +92,7 @@ class OpenTelemetryTracePublisher:
                 "OpenTelemetryTracePublisher 需要 OpenTelemetry API，请安装 "
                 "matterloop-observability[otel]"
             ) from exc
-        self._tracer = tracer_provider.get_tracer("matterloop.observability")
+        self._tracer = tracer_provider.get_tracer(INSTRUMENTATION_SCOPE)
         self._redactor = redactor or Redactor()
         self._runs: dict[str, _LiveRun] = {}
 
@@ -147,32 +177,33 @@ class OpenTelemetryTracePublisher:
         parent_context = self._restored_parent_context(event.context)
         if parent_context is not None:
             options["context"] = parent_context
-        span = self._tracer.start_span("matterloop.run", **options)
-        span.set_attribute("matterloop.run_id", event.context.run_id)
-        span.set_attribute("matterloop.goal", self._redact(event.context.request.goal))
-        span.set_attribute("matterloop.status", event.context.status.value)
+        span = self._tracer.start_span(RUN_SPAN_NAME, **options)
+        span.set_attribute(ATTR_RUN_ID, event.context.run_id)
+        span.set_attribute(ATTR_GOAL, self._redact(event.context.request.goal))
+        span.set_attribute(ATTR_STATUS, event.context.status.value)
         token = self._context.attach(self._trace.set_span_in_context(span))
         return _LiveRun(root=_LiveSpan(span, token, "run"))
 
     def _restored_parent_context(self, context: LoopContext) -> Any | None:
-        """从 checkpoint 恢复 W3C 传播上下文，作为恢复片段的真实父节点。"""
-        if not context.propagation_context:
+        """从 checkpoint 或上游请求恢复 W3C 上下文，作为真实父节点。"""
+        carrier = context.propagation_context or _request_propagation_context(context)
+        if not carrier:
             return None
         try:
             restored = self._propagate.extract(
                 {
-                    header: context.propagation_context[header]
+                    header: carrier[header]
                     for header in ("traceparent", "tracestate")
-                    if header in context.propagation_context
+                    if header in carrier
                 }
             )
             span_context = self._trace.get_current_span(restored).get_span_context()
             if not span_context.is_valid:
-                logger.warning("checkpoint 中的 OTel propagation context 无效，创建新的根 Span")
+                logger.warning("上游 OTel propagation context 无效，创建新的根 Span")
                 return None
             return restored
         except Exception:
-            logger.exception("checkpoint 中的 OTel propagation context 恢复失败")
+            logger.exception("上游 OTel propagation context 恢复失败")
             return None
 
     def _open_phase(self, state: _LiveRun, name: str, event: LoopEvent) -> None:
@@ -185,16 +216,16 @@ class OpenTelemetryTracePublisher:
                 status_message="新的阶段开始前强制关闭上一阶段",
             )
         span = self._tracer.start_span(
-            f"matterloop.{name}",
+            _PHASE_SPAN_NAMES[name],
             start_time=_nanoseconds(event.occurred_at),
         )
-        span.set_attribute("matterloop.run_id", event.context.run_id)
+        span.set_attribute(ATTR_RUN_ID, event.context.run_id)
         if event.detail:
-            span.set_attribute("matterloop.operation_id", event.detail)
+            span.set_attribute(ATTR_OPERATION_ID, event.detail)
         step = _current_step(event)
         if step is not None:
-            span.set_attribute("matterloop.step_id", step.step_id)
-            span.set_attribute("matterloop.executor", step.executor)
+            span.set_attribute(ATTR_STEP_ID, step.step_id)
+            span.set_attribute(ATTR_EXECUTOR, step.executor)
         token = self._context.attach(self._trace.set_span_in_context(span))
         state.phase = _LiveSpan(span, token, name)
 
@@ -247,11 +278,11 @@ class OpenTelemetryTracePublisher:
             if phase.name == "executor":
                 execution = event.context.pending_execution
                 if execution is not None:
-                    phase.span.set_attribute("matterloop.output", execution.output)
+                    phase.span.set_attribute(ATTR_OUTPUT, execution.output)
             elif phase.name == "verifier" and event.context.records:
                 verification = event.context.records[-1].verification
-                phase.span.set_attribute("matterloop.verification_passed", verification.passed)
-                phase.span.set_attribute("matterloop.feedback", verification.feedback)
+                phase.span.set_attribute(ATTR_VERIFICATION_PASSED, verification.passed)
+                phase.span.set_attribute(ATTR_FEEDBACK, verification.feedback)
         except Exception:
             logger.exception("实时 OTel 阶段结果记录失败")
 
@@ -264,16 +295,16 @@ class OpenTelemetryTracePublisher:
         if raw_score is None:
             return
         score_span = self._tracer.start_span(
-            "score:verification",
+            VERIFICATION_SCORE_SPAN_NAME,
             start_time=_nanoseconds(event.occurred_at),
         )
-        score_span.set_attribute("matterloop.run_id", event.context.run_id)
-        score_span.set_attribute("matterloop.step_id", record.step.step_id)
-        score_span.set_attribute("score.name", "verification")
-        score_span.set_attribute("score.value", raw_score / 100.0)
-        score_span.set_attribute("matterloop.score.raw_value", raw_score)
-        score_span.set_attribute("score.source", "VERIFIER")
-        score_span.set_attribute("matterloop.verification_passed", record.verification.passed)
+        score_span.set_attribute(ATTR_RUN_ID, event.context.run_id)
+        score_span.set_attribute(ATTR_STEP_ID, record.step.step_id)
+        score_span.set_attribute(ATTR_SCORE_NAME, "verification")
+        score_span.set_attribute(ATTR_SCORE_VALUE, raw_score / 100.0)
+        score_span.set_attribute(ATTR_SCORE_RAW_VALUE, raw_score)
+        score_span.set_attribute(ATTR_SCORE_SOURCE, "VERIFIER")
+        score_span.set_attribute(ATTR_VERIFICATION_PASSED, record.verification.passed)
         score_span.end(end_time=_nanoseconds(event.occurred_at))
 
     def _close_run(self, run_id: str, state: _LiveRun, event: LoopEvent) -> None:
@@ -293,7 +324,7 @@ class OpenTelemetryTracePublisher:
         finally:
             try:
                 try:
-                    state.root.span.set_attribute("matterloop.status", event.context.status.value)
+                    state.root.span.set_attribute(ATTR_STATUS, event.context.status.value)
                 except Exception:
                     logger.exception("实时 OTel 根 Span 状态记录失败")
                 finally:
@@ -319,6 +350,21 @@ def _current_step(event: LoopEvent) -> Any | None:
         return None
     index = event.context.current_step_index
     return plan.steps[index] if 0 <= index < len(plan.steps) else None
+
+
+def _request_propagation_context(context: LoopContext) -> dict[str, str]:
+    """读取子 Agent 请求中显式携带的有限 W3C 载体。"""
+    value = context.request.metadata.get("propagation_context")
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        header: item
+        for header, item in value.items()
+        if header in {"traceparent", "tracestate"}
+        and isinstance(header, str)
+        and isinstance(item, str)
+        and item
+    }
 
 
 def _nanoseconds(moment: datetime) -> int:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import logging
@@ -11,8 +12,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from matterloop_observability._semantic_conventions import (
+    ATTR_PARENT_SPAN_ID,
+    ATTR_SCORE_COMMENT,
+    ATTR_SCORE_DATA_TYPE,
+    ATTR_SCORE_EVIDENCE,
+    ATTR_SCORE_NAME,
+    ATTR_SCORE_SOURCE,
+    ATTR_SCORE_VALUE,
+    ATTR_SPAN_ID,
+    ATTR_STEP_ID,
+    ATTR_TRACE_ID,
+    INSTRUMENTATION_SCOPE,
+)
 from matterloop_observability.scores import Score
 from matterloop_observability.spans import SpanRecord
+from matterloop_observability.team_tracing import OpenTelemetryTeamInstrumentation
 
 logger = logging.getLogger(__name__)
 
@@ -168,10 +183,15 @@ class OtelExporter:
                 sdk_trace.export.SimpleSpanProcessor(otlp.OTLPSpanExporter(**options))
             )
         self._provider = tracer_provider
-        self._tracer = tracer_provider.get_tracer("matterloop.observability")
+        self._team_instrumentation = OpenTelemetryTeamInstrumentation(tracer_provider)
+        self._tracer = tracer_provider.get_tracer(INSTRUMENTATION_SCOPE)
         self._lock = threading.Lock()
         self._pending: dict[str, list[ExportItem]] = {}
         self._max_pending_items = max_pending_items
+        self._close_condition = threading.Condition()
+        self._close_state = "open"
+        self._close_error: Exception | None = None
+        self._active_exports = 0
 
     @property
     def tracer_provider(self) -> Any:
@@ -183,26 +203,94 @@ class OtelExporter:
         """内部创建 Provider 时为真；其生命周期不能替代应用的全局 Provider。"""
         return self._owns_tracer_provider
 
+    @property
+    def team_instrumentation(self) -> OpenTelemetryTeamInstrumentation:
+        """返回与当前 Provider 共用的 Team 自动追踪能力。"""
+        return self._team_instrumentation
+
+    async def aclose(self) -> None:
+        """在线程中 flush Provider，并只关闭本实例拥有的 Provider。
+
+        多个协程并发或重复关闭时只执行一轮同步生命周期操作；等待方会观察同一个结果。
+        外部注入的共享 Provider 仅由 MatterLoop 请求 ``force_flush``，最终 ``shutdown``
+        仍由应用组合根负责。
+        """
+        await asyncio.to_thread(self._close_provider)
+
+    def _close_provider(self) -> None:
+        """同步完成一次幂等的 Provider flush/shutdown。"""
+        with self._close_condition:
+            while self._close_state == "closing":
+                self._close_condition.wait()
+            if self._close_state == "closed":
+                if self._close_error is not None:
+                    raise self._close_error
+                return
+            self._close_state = "closing"
+            while self._active_exports:
+                self._close_condition.wait()
+
+        error: Exception | None = None
+        try:
+            flushed = self._provider.force_flush()
+            if flushed is False:
+                raise RuntimeError("OpenTelemetry TracerProvider force_flush timed out")
+        except Exception as exc:
+            error = exc
+        finally:
+            if self._owns_tracer_provider:
+                try:
+                    self._provider.shutdown()
+                except Exception as exc:
+                    if error is None:
+                        error = exc
+                    else:
+                        logger.exception("OTel Provider force_flush 失败后 shutdown 也失败")
+            with self._lock:
+                pending_count = sum(len(items) for items in self._pending.values())
+            if pending_count:
+                logger.warning(
+                    "OtelExporter 关闭时仍有 %d 条记录等待根 Span，无法导出",
+                    pending_count,
+                )
+            with self._close_condition:
+                self._close_error = error
+                self._close_state = "closed"
+                self._close_condition.notify_all()
+
+        if error is not None:
+            raise error
+
     def export(self, batch: Sequence[ExportItem]) -> None:
         """把一批记录按父子关系重建为 OTel 跨度并交给 span processor。"""
-        with self._lock:
-            pending_trace_ids: set[str] = set()
-            for item in batch:
-                if isinstance(item, SpanRecord):
-                    trace_id = item.trace_id
-                elif isinstance(item, Score):
-                    trace_id = item.run_id
-                else:
-                    raise TypeError(f"unsupported export item: {type(item).__name__}")
-                pending = self._pending.setdefault(trace_id, [])
-                is_root = isinstance(item, SpanRecord) and item.parent_span_id is None
-                if len(pending) >= self._max_pending_items and not is_root:
-                    logger.warning("OTel trace 根跨度尚未到达，丢弃一条暂存记录")
-                    continue
-                pending.append(item)
-                pending_trace_ids.add(trace_id)
-            for trace_id in pending_trace_ids:
-                self._export_trace(trace_id)
+        with self._close_condition:
+            if self._close_state != "open":
+                raise RuntimeError("OtelExporter is closing or already closed")
+            self._active_exports += 1
+        try:
+            with self._lock:
+                pending_trace_ids: set[str] = set()
+                for item in batch:
+                    if isinstance(item, SpanRecord):
+                        trace_id = item.trace_id
+                    elif isinstance(item, Score):
+                        trace_id = item.run_id
+                    else:
+                        raise TypeError(f"unsupported export item: {type(item).__name__}")
+                    pending = self._pending.setdefault(trace_id, [])
+                    is_root = isinstance(item, SpanRecord) and item.parent_span_id is None
+                    if len(pending) >= self._max_pending_items and not is_root:
+                        logger.warning("OTel trace 根跨度尚未到达，丢弃一条暂存记录")
+                        continue
+                    pending.append(item)
+                    pending_trace_ids.add(trace_id)
+                for trace_id in pending_trace_ids:
+                    self._export_trace(trace_id)
+        finally:
+            with self._close_condition:
+                self._active_exports -= 1
+                if self._active_exports == 0:
+                    self._close_condition.notify_all()
 
     def _export_trace(self, trace_id: str) -> None:
         """在根跨度到达后解析一个运行中所有暂存记录的父子关系。"""
@@ -265,10 +353,10 @@ class OtelExporter:
             record.started_at,
             parent_context=parent_context,
         )
-        span.set_attribute("matterloop.trace_id", record.trace_id)
-        span.set_attribute("matterloop.span_id", record.span_id)
+        span.set_attribute(ATTR_TRACE_ID, record.trace_id)
+        span.set_attribute(ATTR_SPAN_ID, record.span_id)
         if record.parent_span_id is not None:
-            span.set_attribute("matterloop.parent_span_id", record.parent_span_id)
+            span.set_attribute(ATTR_PARENT_SPAN_ID, record.parent_span_id)
         for key, value in record.attributes.items():
             span.set_attribute(key, _otel_attribute_value(value))
         if record.level == "ERROR":
@@ -279,18 +367,18 @@ class OtelExporter:
     def _export_score(self, score: Score, *, parent_context: Any) -> None:
         """把评分导出为同一 trace 下的瞬时跨度。"""
         attributes: dict[str, Any] = {
-            "matterloop.trace_id": score.run_id,
-            "score.name": score.name,
-            "score.value": score.value,
-            "score.data_type": score.data_type,
-            "score.source": score.source,
+            ATTR_TRACE_ID: score.run_id,
+            ATTR_SCORE_NAME: score.name,
+            ATTR_SCORE_VALUE: score.value,
+            ATTR_SCORE_DATA_TYPE: score.data_type,
+            ATTR_SCORE_SOURCE: score.source,
         }
         if score.step_id is not None:
-            attributes["matterloop.step_id"] = score.step_id
+            attributes[ATTR_STEP_ID] = score.step_id
         if score.comment is not None:
-            attributes["score.comment"] = score.comment
+            attributes[ATTR_SCORE_COMMENT] = score.comment
         if score.evidence:
-            attributes["score.evidence"] = [str(item) for item in score.evidence]
+            attributes[ATTR_SCORE_EVIDENCE] = [str(item) for item in score.evidence]
         span = self._start_span(
             f"score:{score.name}",
             score.timestamp,

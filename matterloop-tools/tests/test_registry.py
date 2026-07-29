@@ -1,7 +1,7 @@
 """工具注册、授权和热替换测试。"""
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 
 import pytest
 from matterloop_tools import (
@@ -9,6 +9,7 @@ from matterloop_tools import (
     ToolAccessScope,
     ToolContext,
     ToolEffect,
+    ToolNotFoundError,
     ToolPermissionDeniedError,
     ToolRegistry,
     ToolResult,
@@ -35,6 +36,30 @@ class EchoTool:
     ) -> ToolResult:
         del arguments, context
         return ToolResult(self.label)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class BlockingTool:
+    """等待测试释放信号的工具，用于验证 graceful close。"""
+
+    spec = ToolSpec("blocking", "阻塞调用", {"type": "object"})
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.closed = False
+
+    async def invoke(
+        self,
+        arguments: Mapping[str, object],
+        context: ToolContext,
+    ) -> ToolResult:
+        del arguments, context
+        self.started.set()
+        await self.release.wait()
+        return ToolResult("done")
 
     async def aclose(self) -> None:
         self.closed = True
@@ -145,6 +170,29 @@ class ContextTool:
         identity = context.metadata["identity"]
         assert isinstance(identity, Mapping)
         return ToolResult(str(identity["tenant"]))
+
+
+class RecordingMiddleware:
+    """记录中间件看到的稳定调用边界及最终结果。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Mapping[str, object], str]] = []
+
+    async def invoke(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, object],
+        context: ToolContext,
+        call_next: Callable[[], Awaitable[ToolResult]],
+    ) -> ToolResult:
+        del context
+        try:
+            result = await call_next()
+        except Exception as exc:
+            self.calls.append((tool_name, arguments, type(exc).__name__))
+            raise
+        self.calls.append((tool_name, arguments, "success"))
+        return result
 
 
 async def test_registry_invokes_and_replaces_tool() -> None:
@@ -294,6 +342,77 @@ async def test_full_scope_keeps_main_loop_access_to_unknown_effect() -> None:
 
     assert result.content == "ok"
     assert tool.invocations == 1
+
+
+async def test_middleware_wraps_success_denial_and_missing_tool() -> None:
+    """中间件应覆盖工具查找和权限拒绝，同时不改变原始结果/异常。"""
+    middleware = RecordingMiddleware()
+    registry = ToolRegistry([EchoTool("ok")], middleware=middleware)
+
+    result = await registry.invoke(
+        "echo",
+        {"nested": ["stable"]},
+        context=ToolContext("run-success"),
+    )
+    with pytest.raises(ToolPermissionDeniedError):
+        await registry.invoke(
+            "echo",
+            {},
+            context=ToolContext("run-denied", access_scope=ToolAccessScope.READ_ONLY),
+        )
+    with pytest.raises(ToolNotFoundError):
+        await registry.invoke("missing", {}, context=ToolContext("run-missing"))
+
+    assert result.content == "ok"
+    assert [outcome for _, _, outcome in middleware.calls] == [
+        "success",
+        "ToolPermissionDeniedError",
+        "ToolNotFoundError",
+    ]
+    nested = middleware.calls[0][1]["nested"]
+    assert nested == ("stable",)
+
+
+async def test_registry_close_waits_for_active_invocation_to_finish() -> None:
+    tool = BlockingTool()
+    registry = ToolRegistry([tool])
+    invocation = asyncio.create_task(registry.invoke("blocking", {}, context=ToolContext("run")))
+    await tool.started.wait()
+    close_task = asyncio.create_task(registry.aclose())
+    await asyncio.sleep(0)
+
+    assert not close_task.done()
+    assert not tool.closed
+
+    tool.release.set()
+    result = await invocation
+    await close_task
+
+    assert result.content == "done"
+    assert tool.closed
+
+
+async def test_cancelled_registry_close_waiter_does_not_abandon_tool_close() -> None:
+    """取消关闭等待方不能中止已经开始的工具释放流程。"""
+    tool = BlockingTool()
+    registry = ToolRegistry([tool])
+    invocation = asyncio.create_task(registry.invoke("blocking", {}, context=ToolContext("run")))
+    await tool.started.wait()
+    first_waiter = asyncio.create_task(registry.aclose())
+    await asyncio.sleep(0)
+
+    first_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_waiter
+
+    tool.release.set()
+    assert (await invocation).content == "done"
+    for _ in range(10):
+        if tool.closed:
+            break
+        await asyncio.sleep(0)
+
+    assert tool.closed
 
 
 def test_tool_spec_resolves_operation_effect_case_insensitively() -> None:

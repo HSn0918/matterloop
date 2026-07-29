@@ -92,6 +92,12 @@ An unlabeled custom tool is `UNKNOWN` and is therefore denied in read-only conte
 `effect_for(arguments)` supports catalog generation, audits, and tests; `ToolRegistry.invoke()` is the
 enforcement point.
 
+`ToolInvocationMiddleware.invoke(tool_name, arguments, context, call_next)` is a structural protocol
+with no tracing SDK dependency. The registry invokes it after snapshotting arguments but before tool
+lookup and authorization, so success, missing-tool, and denial paths share one boundary. The default
+`PassthroughToolInvocationMiddleware` calls the next layer directly. The OTel implementation lives in
+`matterloop-observability`; the tools package does not depend back on observability.
+
 The Schema is for discovery; it does not mean that the registry automatically evaluates JSON Schema.
 Every custom tool must validate all arguments locally. Provider-side strict tools do not replace
 authorization.

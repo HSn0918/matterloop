@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
+
+import pytest
 from matterloop_core import (
     HumanAction,
     HumanResponse,
@@ -86,6 +90,107 @@ async def test_async_runtime_delegates_all_operations() -> None:
     assert engine.human_responses == [("run-1", response)]
     assert await runtime.cancel("run-1")
     assert engine.cancelled == ["run-1"]
+
+
+async def test_async_runtime_close_waits_for_inflight_run_before_closing_resources() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingLoopEngine(FakeLoopEngine):
+        async def run(self, request: LoopRequest, *, run_id: str | None = None) -> LoopResult:
+            del request
+            started.set()
+            await release.wait()
+            return _result(run_id or "generated")
+
+    engine = BlockingLoopEngine()
+    resource = Resource()
+    runtime = AsyncRuntime(engine, resources=[resource])
+    running = asyncio.create_task(runtime.run(LoopRequest("goal"), run_id="in-flight"))
+    await started.wait()
+    closing = asyncio.create_task(runtime.aclose())
+    await asyncio.sleep(0)
+
+    assert not closing.done()
+    assert not resource.closed
+
+    release.set()
+    assert (await running).run_id == "in-flight"
+    await closing
+    assert resource.closed
+
+
+async def test_async_runtime_close_waits_for_inflight_cancel_before_closing_resources() -> None:
+    """异步 cancel 也必须纳入运行时 drain，避免终态事件与 exporter 关闭竞态。"""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingCancelEngine(FakeLoopEngine):
+        async def cancel(self, run_id: str) -> bool:
+            self.cancelled.append(run_id)
+            started.set()
+            await release.wait()
+            return True
+
+    engine = BlockingCancelEngine()
+    resource = Resource()
+    runtime = AsyncRuntime(engine, resources=[resource])
+    cancelling = asyncio.create_task(runtime.cancel("in-flight"))
+    await started.wait()
+    closing = asyncio.create_task(runtime.aclose())
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    assert not closing.done()
+    assert not resource.closed
+
+    release.set()
+    assert await cancelling
+    await closing
+    assert resource.closed
+
+
+async def test_async_runtime_cancelled_close_waiter_does_not_abandon_resource_close() -> None:
+    """取消首个 aclose 调用方只能取消等待，不能伪造关闭完成或遗留资源。"""
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+
+    class BlockingResource(Resource):
+        async def aclose(self) -> None:
+            close_started.set()
+            await release_close.wait()
+            self.closed = True
+
+    resource = BlockingResource()
+    runtime = AsyncRuntime(FakeLoopEngine(), resources=[resource])
+    first_waiter = asyncio.create_task(runtime.aclose())
+    await close_started.wait()
+    first_waiter.cancel()
+    with suppress(asyncio.CancelledError):
+        await first_waiter
+
+    second_waiter = asyncio.create_task(runtime.aclose())
+    await asyncio.sleep(0)
+    assert not second_waiter.done()
+    assert not resource.closed
+
+    release_close.set()
+    await second_waiter
+    assert resource.closed
+
+
+async def test_async_runtime_context_exit_preserves_block_error_when_close_fails() -> None:
+    """资源关闭失败不得掩盖 async with 块内原始异常。"""
+
+    class FailingResource:
+        async def aclose(self) -> None:
+            raise RuntimeError("close failed")
+
+    runtime = AsyncRuntime(FakeLoopEngine(), resources=[FailingResource()])
+
+    with pytest.raises(ValueError, match="block failed"):
+        async with runtime:
+            raise ValueError("block failed")
 
 
 def test_local_runtime_uses_background_event_loop() -> None:

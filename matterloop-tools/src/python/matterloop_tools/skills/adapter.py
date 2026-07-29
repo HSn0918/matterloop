@@ -175,7 +175,10 @@ class SkillTool:
             ]
             return ToolResult(
                 json.dumps({"kind": "skill_catalog", "skills": skills}, ensure_ascii=False),
-                metadata={"trust": SkillContentTrust.UNTRUSTED_REFERENCE.value},
+                metadata={
+                    "skill_operation": "list",
+                    "trust": SkillContentTrust.UNTRUSTED_REFERENCE.value,
+                },
             )
         if operation == "get":
             self._reject_unknown_arguments(arguments, frozenset({"operation", "name"}))
@@ -200,6 +203,8 @@ class SkillTool:
                 ),
                 metadata={
                     "skill_name": block.name,
+                    "skill_version": block.version,
+                    "skill_operation": "get",
                     "sha256": block.sha256,
                     "trust": block.trust.value,
                 },

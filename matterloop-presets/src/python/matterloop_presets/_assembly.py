@@ -11,6 +11,7 @@ from matterloop_agents import (
     CriteriaVerifierConfig,
     ModelPlanner,
     ModelPlannerConfig,
+    TeamInstrumentation,
     ToolCallingWorker,
     ToolCallingWorkerConfig,
 )
@@ -108,6 +109,7 @@ def _assemble_runtime(
     privileged_executors: frozenset[str] = frozenset(),
     require_citation: bool = False,
     extra_resources: tuple[AsyncClosable, ...] = (),
+    team_instrumentation: TeamInstrumentation | None = None,
 ) -> PresetRuntime:
     """把稳定组件协议装配为一个异步运行门面。"""
     actual_model = model
@@ -197,11 +199,11 @@ def _assemble_runtime(
         approval_gate=approval_gate,
         retry_policy=ExponentialBackoffRetryPolicy(config.retry),
     )
-    resources: list[AsyncClosable] = []
+    # Sink 先注册，使 AsyncRuntime 的逆序关闭先停工具/模型，最后再 drain/flush 遥测。
+    resources: list[AsyncClosable] = list(extra_resources)
     if callable(getattr(actual_model, "aclose", None)):
         resources.append(cast(AsyncClosable, actual_model))
     resources.extend(tool_registries.values())
-    resources.extend(extra_resources)
     return PresetRuntime(
         loop,
         models,
@@ -209,6 +211,7 @@ def _assemble_runtime(
         checkpoint_store,
         config,
         resources=tuple(resources),
+        team_instrumentation=team_instrumentation,
     )
 
 

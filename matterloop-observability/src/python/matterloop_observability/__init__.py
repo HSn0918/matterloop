@@ -39,6 +39,12 @@ from matterloop_observability.redaction import Redactor
 from matterloop_observability.router import EventRouter, EventRule
 from matterloop_observability.scores import Score, score_from_review, score_from_verification
 from matterloop_observability.spans import SpanRecord
+from matterloop_observability.team_tracing import (
+    OpenTelemetryTeamInstrumentation,
+    OpenTelemetryTeamTaskMiddleware,
+    OpenTelemetryTeamTracePublisher,
+)
+from matterloop_observability.tool_tracing import OpenTelemetryToolMiddleware
 from matterloop_observability.trace_builder import TraceBuilder
 from matterloop_observability.tracing import TracingHandler
 
@@ -61,6 +67,10 @@ __all__ = [
     "OpenTelemetryMetricsHandler",
     "OpenTelemetryModelClient",
     "OpenTelemetryTracePublisher",
+    "OpenTelemetryToolMiddleware",
+    "OpenTelemetryTeamInstrumentation",
+    "OpenTelemetryTeamTaskMiddleware",
+    "OpenTelemetryTeamTracePublisher",
     "OtelExporter",
     "PublisherFailureMode",
     "Redactor",

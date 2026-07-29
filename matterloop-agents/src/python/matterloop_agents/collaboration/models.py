@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from math import isfinite
+from types import MappingProxyType
 from uuid import uuid4
 
 from matterloop_core import (
@@ -18,6 +19,8 @@ from matterloop_core import (
 
 from matterloop_agents.collaboration._immutability import freeze_mapping
 
+_W3C_PROPAGATION_HEADERS = frozenset({"traceparent", "tracestate"})
+
 
 def _validate_text(value: str, field_name: str) -> None:
     """校验稳定标识和面向 Agent 的文本。"""
@@ -28,6 +31,20 @@ def _validate_text(value: str, field_name: str) -> None:
 def _freeze_metadata(value: Mapping[str, object]) -> Mapping[str, object]:
     """复制并冻结调用方元数据，隔离运行中的外部修改。"""
     return freeze_mapping(value)
+
+
+def _freeze_propagation_context(value: Mapping[str, str]) -> Mapping[str, str]:
+    """校验并冻结 W3C 传播载体；空 ``tracestate`` 是合法值。"""
+    if any(
+        header not in _W3C_PROPAGATION_HEADERS
+        or not isinstance(item, str)
+        or (header == "traceparent" and not item)
+        for header, item in value.items()
+    ):
+        raise ValueError(
+            "propagation_context must contain only traceparent/tracestate string values"
+        )
+    return MappingProxyType(dict(value))
 
 
 class TeamStatus(str, Enum):
@@ -384,13 +401,19 @@ class AgentTaskContext:
     dependency_results: tuple[TaskResult, ...] = ()
     previous_error: str = ""
     human_feedback: tuple[HumanInteractionRecord, ...] = ()
+    propagation_context: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """校验上下文关联标识和尝试次数。"""
+        """校验上下文关联标识、尝试次数并冻结传播载体。"""
         _validate_text(self.team_run_id, "team_run_id")
         _validate_text(self.agent_id, "agent_id")
         if self.attempt < 1:
             raise ValueError("attempt must be at least 1")
+        object.__setattr__(
+            self,
+            "propagation_context",
+            _freeze_propagation_context(self.propagation_context),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,6 +493,7 @@ class TeamSnapshot:
     review_approved_cycle: int | None = None
     active_elapsed_seconds: float = 0.0
     active_started_at: datetime | None = None
+    propagation_context: Mapping[str, str] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -489,6 +513,11 @@ class TeamSnapshot:
         task_ids = [state.spec.task_id for state in self.tasks]
         if len(task_ids) != len(set(task_ids)):
             raise ValueError("snapshot contains duplicate task identifiers")
+        object.__setattr__(
+            self,
+            "propagation_context",
+            _freeze_propagation_context(self.propagation_context),
+        )
 
     @property
     def feedback_history(self) -> tuple[HumanInteractionRecord, ...]:

@@ -293,7 +293,10 @@ async def test_human_rejection_remains_structurally_blocked_on_resume() -> None:
     reviewer = _SequenceReviewer(
         (TeamReview(TeamReviewAction.REQUEST_HUMAN, interaction=interaction),)
     )
-    orchestrator = _orchestrator(planner, endpoint, reviewer=reviewer)
+    events = LocalTeamEventPublisher()
+    published: list[TeamEvent] = []
+    events.subscribe(published.append)
+    orchestrator = _orchestrator(planner, endpoint, reviewer=reviewer, events=events)
 
     await orchestrator.run(TeamRequest("待拒绝草稿"), run_id="reject-draft")
     rejected = await orchestrator.submit_human_response(
@@ -311,6 +314,49 @@ async def test_human_rejection_remains_structurally_blocked_on_resume() -> None:
     assert rejected.stop_reason is TeamStopReason.HUMAN_REJECTED
     assert resumed == rejected
     assert len(endpoint.calls) == 1
+    assert published[-1].event_type is TeamEventType.TEAM_BLOCKED
+
+
+async def test_human_revision_limit_publishes_team_failed_terminal_event() -> None:
+    """人工修订耗尽上限时必须发布关闭 Team span 所需的 TEAM_FAILED。"""
+    planner = _RecordingPlanner()
+    endpoint = _RecordingEndpoint(AgentSpec("analyst", frozenset({"analysis"})))
+    interaction = HumanInteractionRequest(
+        HumanInteractionKind.COMPLETION_REVIEW,
+        "请修订草稿",
+        (HumanAction.REVISE,),
+    )
+    reviewer = _SequenceReviewer(
+        (TeamReview(TeamReviewAction.REQUEST_HUMAN, interaction=interaction),)
+    )
+    events = LocalTeamEventPublisher()
+    published: list[TeamEvent] = []
+    events.subscribe(published.append)
+    orchestrator = _orchestrator(planner, endpoint, reviewer=reviewer, events=events)
+
+    await orchestrator.run(
+        TeamRequest(
+            "修订次数受限",
+            limits=TeamLimits(max_plan_revisions=0),
+        ),
+        run_id="revision-limit",
+    )
+    failed = await orchestrator.submit_human_response(
+        "revision-limit",
+        HumanResponse(
+            interaction.interaction_id,
+            HumanAction.REVISE,
+            "需要再改一次",
+            idempotency_key="revision-limit-once",
+        ),
+    )
+
+    assert failed.status is TeamStatus.FAILED
+    assert failed.stop_reason is TeamStopReason.PLAN_REVISION_LIMIT
+    assert [event.event_type for event in published[-2:]] == [
+        TeamEventType.HUMAN_RESPONSE_SUBMITTED,
+        TeamEventType.TEAM_FAILED,
+    ]
 
 
 async def test_task_failures_replan_until_cycle_limit() -> None:

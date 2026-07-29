@@ -16,6 +16,7 @@ from matterloop_core import (
 )
 from matterloop_observability import (
     BatchingPipeline,
+    OpenTelemetryModelClient,
     SpanRecord,
     TraceBuilder,
     TracedModelClient,
@@ -77,6 +78,16 @@ class _FakeClient:
         return _response()
 
 
+def _provider_and_exporter() -> tuple[Any, Any]:
+    sdk_trace = pytest.importorskip("opentelemetry.sdk.trace")
+    sdk_export = pytest.importorskip("opentelemetry.sdk.trace.export")
+    in_memory = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
+    provider = sdk_trace.TracerProvider()
+    exporter = in_memory.InMemorySpanExporter()
+    provider.add_span_processor(sdk_export.SimpleSpanProcessor(exporter))
+    return provider, exporter
+
+
 def _open_executor_run(builder: TraceBuilder) -> LoopContext:
     """驱动到执行器跨度打开的事件序列。"""
     step = PlanStep("实现功能", executor="coder", step_id="step-1")
@@ -118,7 +129,8 @@ def test_generation_span_links_to_active_step_span_and_records_usage() -> None:
         generation = _spans(exporter, "generation")[-1]
         assert generation.trace_id == "run-1"
         assert generation.parent_span_id == parent_id
-        assert generation.name == "generation:coder"
+        assert generation.name == "matterloop.generation"
+        assert generation.attributes["matterloop.agent"] == "coder"
         attributes = generation.attributes
         assert attributes["matterloop.step_id"] == "step-1"
         assert attributes["matterloop.model"] == "fake-model"
@@ -195,9 +207,25 @@ def test_without_trace_builder_generation_span_has_no_parent() -> None:
 
         generation = _spans(exporter, "generation")[-1]
         assert generation.parent_span_id is None
-        assert generation.name == "generation"
+        assert generation.name == "matterloop.generation"
     finally:
         pipeline.shutdown()
+
+
+async def test_live_generation_span_ends_even_if_context_detach_fails() -> None:
+    """ContextVar token 解绑异常不能跳过 generation Span.end()。"""
+    provider, exporter = _provider_and_exporter()
+    client = OpenTelemetryModelClient(_FakeClient(), provider)
+    detach = client._context.detach
+    client._context.detach = lambda token: (_ for _ in ()).throw(ValueError("wrong task"))
+    try:
+        response = await client.generate(_request({"run_id": "run-detach"}))
+    finally:
+        client._context.detach = detach
+
+    assert response.output_text == "模型输出"
+    spans = exporter.get_finished_spans()
+    assert [span.name for span in spans] == ["matterloop.generation"]
 
 
 def test_traced_model_client_requires_a_trace_sink() -> None:

@@ -96,6 +96,10 @@ async def test_reference_tool_exposes_data_without_executing_skill_content(
     assert catalog["skills"][0]["name"] == "unsafe-text"
     assert reference["kind"] == "untrusted_reference"
     assert reference["content"] == command
+    assert catalog_result.metadata["skill_operation"] == "list"
+    assert reference_result.metadata["skill_name"] == "unsafe-text"
+    assert reference_result.metadata["skill_operation"] == "get"
+    assert reference_result.metadata["skill_version"] == "1.0"
     assert reference_result.metadata["trust"] == "untrusted_reference"
     assert not marker.exists()
 

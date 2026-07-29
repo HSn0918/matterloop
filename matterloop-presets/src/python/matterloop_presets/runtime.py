@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
+from matterloop_agents import TeamInstrumentation
 from matterloop_core import (
     AgentLoop,
     CheckpointStore,
@@ -36,6 +37,7 @@ class PresetRuntime(AsyncRuntime):
         checkpoint_store: 当前 Loop 使用的检查点存储。
         config: 构建该运行时的不可变预设配置。
         resources: 退出异步上下文时需要逆序关闭的资源。
+        team_instrumentation: 可选的 Team 自动观测能力；生产 OTel 预设自动注入。
     """
 
     def __init__(
@@ -47,6 +49,7 @@ class PresetRuntime(AsyncRuntime):
         config: AgentPresetConfig,
         *,
         resources: tuple[AsyncClosable, ...] = (),
+        team_instrumentation: TeamInstrumentation | None = None,
     ) -> None:
         super().__init__(loop, resources=resources)
         self.loop = loop
@@ -54,6 +57,7 @@ class PresetRuntime(AsyncRuntime):
         self.tool_registries = MappingProxyType(dict(tool_registries))
         self.checkpoint_store = checkpoint_store
         self.config = config
+        self.team_instrumentation = team_instrumentation
 
 
 class ProductionRuntime:

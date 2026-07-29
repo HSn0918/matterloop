@@ -138,6 +138,9 @@ def test_worker_pins_model_during_tool_transaction_and_replaces_next_transaction
         assert tools.calls[0][0] == "echo"
         assert tools.calls[0][2].run_id == "run-1"
         assert tools.calls[0][2].access_scope is ToolAccessScope.FULL
+        assert tools.calls[0][2].metadata["goal"] == "执行回显"
+        assert tools.calls[0][2].metadata["tool_call_id"] == "call_1"
+        assert tools.calls[0][2].metadata["executor"] == "default"
         assert first_model.requests[1].tool_outputs[0].output == "echo result"
         assert replacement.requests == ()
         assert first_result.metadata["total_tokens"] == 0

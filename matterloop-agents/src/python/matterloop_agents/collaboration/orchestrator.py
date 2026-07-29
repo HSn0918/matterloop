@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Coroutine
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, replace
@@ -53,17 +54,22 @@ from matterloop_agents.collaboration.models import (
 from matterloop_agents.collaboration.protocols import (
     AgentEndpoint,
     AgentSelectionPolicy,
+    PassthroughTeamTaskInvocationMiddleware,
     ResultAggregator,
     TaskVerifier,
     TeamApprovalGate,
     TeamEventPublisher,
+    TeamInstrumentation,
     TeamPlanner,
     TeamRepository,
     TeamReviewer,
+    TeamSnapshotPreparer,
+    TeamTaskInvocationMiddleware,
 )
 from matterloop_agents.collaboration.task_graph import TaskGraph
 
 _UNSET = object()
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +86,10 @@ class TeamOrchestratorComponents:
         events: 接收完整生命周期审计事件的发布器。
         aggregator: 把所有已验证结果汇总成最终输出的组件。
         reviewer: 可选的团队总体目标审查器；未注入时保持 0.1 接受行为。
+        task_middleware: 可选的中立 Endpoint 调用中间件；显式传入时覆盖 Endpoint Runtime
+            自动暴露的 Team instrumentation。
+        snapshot_preparer: 可选的快照保存前准备器；用于把 W3C 上下文与业务快照同次 CAS
+            持久化。未显式传入时复用自动发现的 instrumentation event publisher。
     """
 
     planner: TeamPlanner
@@ -91,6 +101,8 @@ class TeamOrchestratorComponents:
     events: TeamEventPublisher
     aggregator: ResultAggregator
     reviewer: TeamReviewer | None = None
+    task_middleware: TeamTaskInvocationMiddleware | None = None
+    snapshot_preparer: TeamSnapshotPreparer | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +143,27 @@ class TeamOrchestrator:
         owner_id: str | None = None,
     ) -> None:
         self._components = components
+        auto_instrumentation: TeamInstrumentation | None = None
+        if components.task_middleware is None:
+            auto_instrumentation = components.agents.team_instrumentation()
+        self._task_middleware = components.task_middleware or (
+            auto_instrumentation.task_middleware
+            if auto_instrumentation is not None
+            else PassthroughTeamTaskInvocationMiddleware()
+        )
+        auto_events = (
+            auto_instrumentation.event_publisher if auto_instrumentation is not None else None
+        )
+        auto_preparer = auto_events
+        self._snapshot_preparer = components.snapshot_preparer or (
+            auto_preparer if isinstance(auto_preparer, TeamSnapshotPreparer) else None
+        )
+        explicit_events = (
+            self._snapshot_preparer
+            if isinstance(self._snapshot_preparer, TeamEventPublisher)
+            else None
+        )
+        self._instrumentation_events = auto_events if auto_events is not None else explicit_events
         self._owner_id = owner_id or uuid4().hex
         if not self._owner_id.strip():
             raise ValueError("owner_id must not be empty")
@@ -183,6 +216,7 @@ class TeamOrchestrator:
         await self._claim_run(resolved_run_id)
         try:
             await self._publish(TeamEventType.TEAM_STARTED, initial)
+            initial = await self._persist_prepared_snapshot(initial)
             await self._publish(TeamEventType.PLANNING_STARTED, initial)
             operation = self._plan_and_execute(initial)
             remaining = None if deadline is None else deadline - asyncio.get_running_loop().time()
@@ -427,6 +461,7 @@ class TeamOrchestrator:
             )
             await self._publish(TeamEventType.HUMAN_RESPONSE_SUBMITTED, snapshot)
             await self._publish(TeamEventType.HUMAN_REJECTED, snapshot)
+            await self._publish(TeamEventType.TEAM_BLOCKED, snapshot, detail=snapshot.error)
             return self._result(snapshot)
 
         if response.action is HumanAction.APPROVE:
@@ -483,6 +518,8 @@ class TeamOrchestrator:
                 human_interactions=interactions,
                 cycle_history=history,
             )
+            await self._publish(TeamEventType.HUMAN_RESPONSE_SUBMITTED, snapshot)
+            await self._publish(TeamEventType.TEAM_FAILED, snapshot, detail=snapshot.error)
             return self._result(snapshot)
         snapshot = await self._save(
             snapshot,
@@ -620,6 +657,7 @@ class TeamOrchestrator:
                 dependency_results=graph.dependency_results(state.spec.task_id),
                 previous_error=state.error,
                 human_feedback=snapshot.human_interactions,
+                propagation_context=snapshot.propagation_context,
             )
             outcome = _TaskOutcome(
                 state.spec,
@@ -663,6 +701,7 @@ class TeamOrchestrator:
                 dependency_results=graph.dependency_results(task.task_id),
                 previous_error=state.error,
                 human_feedback=snapshot.human_interactions,
+                propagation_context=snapshot.propagation_context,
             )
             decision = await self._components.approval_gate.decide(context)
             if decision is ApprovalDecision.APPROVED:
@@ -784,6 +823,7 @@ class TeamOrchestrator:
                     dependency_results=graph.dependency_results(task.task_id),
                     previous_error=state.error,
                     human_feedback=snapshot.human_interactions,
+                    propagation_context=snapshot.propagation_context,
                 )
                 scheduled.append(_ScheduledTask(task, lease.endpoint, context))
 
@@ -850,7 +890,11 @@ class TeamOrchestrator:
 
     async def _invoke(self, scheduled: _ScheduledTask) -> _TaskOutcome:
         try:
-            result = await scheduled.endpoint.execute(scheduled.context)
+
+            async def call_next(context: AgentTaskContext) -> TaskResult:
+                return await scheduled.endpoint.execute(context)
+
+            result = await self._task_middleware.invoke(scheduled.context, call_next)
             self._validate_result(scheduled, result)
             if not result.success:
                 return _TaskOutcome(
@@ -1349,6 +1393,7 @@ class TeamOrchestrator:
             active_started_at=active_started,
             updated_at=now,
         )
+        candidate = await self._prepare_snapshot(candidate)
         return await self._components.repository.save(candidate, snapshot.version)
 
     async def _publish(
@@ -1359,14 +1404,57 @@ class TeamOrchestrator:
         detail: str = "",
         metadata: dict[str, object] | None = None,
     ) -> None:
-        await self._components.events.publish(
-            TeamEvent(
-                event_type=event_type,
-                snapshot=snapshot,
-                detail=detail,
-                metadata=metadata or {},
-            )
+        event = TeamEvent(
+            event_type=event_type,
+            snapshot=snapshot,
+            detail=detail,
+            metadata=metadata or {},
         )
+        try:
+            await self._components.events.publish(event)
+        finally:
+            if (
+                self._instrumentation_events is not None
+                and self._instrumentation_events is not self._components.events
+            ):
+                try:
+                    await self._instrumentation_events.publish(event)
+                except Exception:
+                    logger.exception(
+                        "Team instrumentation event publisher failed",
+                        extra={"event_type": event_type.value, "run_id": snapshot.run_id},
+                    )
+
+    async def _persist_prepared_snapshot(self, snapshot: TeamSnapshot) -> TeamSnapshot:
+        """仅在准备器实际补充持久化字段时提交一次 CAS。"""
+        prepared = await self._prepare_snapshot(snapshot)
+        if prepared == snapshot:
+            return snapshot
+        return await self._components.repository.save(prepared, snapshot.version)
+
+    async def _prepare_snapshot(self, snapshot: TeamSnapshot) -> TeamSnapshot:
+        """隔离 instrumentation 故障，保证观测准备不会改变 Team 业务结果。"""
+        if self._snapshot_preparer is None:
+            return snapshot
+        try:
+            prepared = await self._snapshot_preparer.prepare_snapshot(snapshot)
+            if not isinstance(prepared, TeamSnapshot):
+                raise TypeError("team snapshot preparer returned an invalid value")
+            if (
+                replace(
+                    prepared,
+                    propagation_context=snapshot.propagation_context,
+                )
+                != snapshot
+            ):
+                raise ValueError("team snapshot preparer changed business state")
+            return prepared
+        except Exception:
+            logger.exception(
+                "Team snapshot preparation failed",
+                extra={"run_id": snapshot.run_id},
+            )
+            return snapshot
 
     async def _publish_ready_tasks(
         self,

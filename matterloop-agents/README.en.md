@@ -119,6 +119,13 @@ runtime = AsyncTeamRuntime(
 )
 ```
 
+If `child_runtime` is the `worker_runtime` created by the production preset with an `OtelExporter`,
+`LoopAgentEndpoint` exposes its instrumentation and `TeamOrchestrator` automatically installs Team
+event tracing and task middleware. The components above need no additional OTel fields. Register
+Endpoints before constructing `TeamOrchestrator`.
+Custom Endpoint proxies wrapping `LoopAgentEndpoint` should forward the optional
+`team_instrumentation` attribute unchanged; the built-in `BudgetedAgentEndpoint` already does so.
+
 With `reviewer=None`, every draft whose tasks passed verification is automatically accepted.
 `ResultSuccessVerifier` also checks only the `success` flag. These behaviors are useful in tests, but
 they are not production acceptance. A production team should configure a domain Verifier, a
@@ -206,7 +213,7 @@ occurred.
 - `TeamLimits(max_tasks, max_concurrency, max_task_attempts, max_cycles, max_plan_revisions, timeout_seconds)`: defaults to 50, 4, 3, 3, 2, and no timeout.
 - `AgentSpec(agent_id, capabilities, max_concurrency, version, description, role, metadata)`.
 - `TaskSpec(task_id, description, capability, dependencies, acceptance_criteria, requires_approval, priority, metadata, replay_safe)`; `replay_safe` defaults to `False`, and only explicitly replay-safe pure computations are automatically invoked again after a crash.
-- `AgentTaskContext(team_run_id, request, task, agent_id, attempt, dependency_results, previous_error, human_feedback)`.
+- `AgentTaskContext(team_run_id, request, task, agent_id, attempt, dependency_results, previous_error, human_feedback, propagation_context)`: `propagation_context` lets middleware pass a standard correlation carrier to an Endpoint.
 - `TaskResult(task_id, agent_id, success, output, artifacts, error, attempt, metadata)`.
 - `TaskVerification(passed, feedback, score, evidence, failed_criteria)`.
 - `TaskState(spec, status, attempt, approval_granted, assigned_agent, result, verification, error)`.
@@ -214,11 +221,12 @@ occurred.
 - `TeamReviewContext(run_id, request, cycle, plan_revision, task_results, draft_output, prior_reviews, human_feedback)`.
 - `TeamReview(action, feedback, score, evidence, failed_criteria, interaction)`.
 - `TeamCycleRecord(cycle, plan_revision, tasks, draft_output, review, error)`.
-- `TeamSnapshot(request, tasks, run_id, status, version, stop_reason, output, error, cycle, plan_revision, cycle_history, pending_interaction, pending_review, human_interactions, external_state_refs, review_approved_cycle, active_elapsed_seconds, active_started_at, created_at, updated_at)`.
+- `TeamSnapshot(request, tasks, run_id, status, version, stop_reason, output, error, cycle, plan_revision, cycle_history, pending_interaction, pending_review, human_interactions, external_state_refs, review_approved_cycle, active_elapsed_seconds, active_started_at, propagation_context, created_at, updated_at)`: `external_state_refs` retain Runtime-managed state; `propagation_context` is persisted with the snapshot CAS and contains only a trusted W3C carrier.
 - `TeamResult(run_id, status, task_results, output, stop_reason, error, cycle, cycle_history, pending_interaction, human_interactions, started_at, finished_at)`.
 - `TeamEvent(event_type, snapshot, detail, metadata, occurred_at)`: the event carries the complete Snapshot at that point and may be large and sensitive.
 - `AgentMessage(team_run_id, sender_agent_id, recipient_agent_id, message_type, content, correlation_id, metadata, message_id, created_at)`: optional Mailbox DTO; it is not a global-state channel.
-- `TeamOrchestratorComponents(planner, agents, selection_policy, verifier, approval_gate, repository, events, aggregator, reviewer)`.
+- `TeamOrchestratorComponents(planner, agents, selection_policy, verifier, approval_gate, repository, events, aggregator, reviewer, task_middleware, snapshot_preparer)`: `task_middleware` wraps one Endpoint invocation and may pass an immutable context copy without changing business-result semantics; `snapshot_preparer` adds neutral persistent correlation fields before the CAS save.
+- `TeamSnapshotPreparer.prepare_snapshot(snapshot)`: returns a snapshot copy containing only neutral correlation fields; the controller isolates preparer failures.
 
 `TeamReviewAction` is `ACCEPT/REPLAN/REQUEST_HUMAN/STOP`. Team stop reasons distinguish completion,
 approval/human rejection, task failure, no available Agent, capacity, deadlock, cancellation, timeout,
@@ -234,7 +242,7 @@ cycle/revision limits, budget exhaustion, recovery reconciliation, and component
 - Endpoints, tools, and business writes must use team run/task/attempt as idempotency keys.
 - `ResourceLimitExceededError` maps to `BLOCKED/BUDGET_EXHAUSTED`; it is not retried as an ordinary task error.
 - Team events may contain the goal, complete output, human feedback, and metadata. Publishers and Repositories must enforce tenant isolation, encryption, retention, and redaction.
-- `AsyncTeamRuntime` closes only objects listed in `resources`; it does not take ownership of the Directory, models, repository, or event backend.
+- `AsyncTeamRuntime` rejects new operations and drains in-flight `run`, `resume`, and human-response operations before closing objects listed in `resources`; it does not take ownership of the Directory, models, repository, or event backend.
 - `LocalTeamRuntime` uses a dedicated event-loop thread. It must be closed, and it cannot call itself synchronously from that thread.
 
 See the [architecture documentation](https://github.com/huleidada/matterloop/blob/main/docs/architecture.en.md)
