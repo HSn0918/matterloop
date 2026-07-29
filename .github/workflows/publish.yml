@@ -285,3 +285,46 @@ jobs:
             matterloop_integration_celery \
             matterloop_integration_redis
           .pypi-test/bin/python -c "import mcp.client.session, mcp.types, openai, opentelemetry"
+
+  release:
+    name: Create the GitHub Release
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the released source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Create the GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "GitHub Release ${RELEASE_TAG} 已存在，跳过重复创建。"
+            exit 0
+          fi
+          version="${RELEASE_TAG#v}"
+          awk -v header="## [${version}]" '
+            index($0, header) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > release-notes.md
+          {
+            echo
+            echo "## 发布内容"
+            echo
+            echo "MatterLoop 的 12 个发行包均已通过 PyPI Trusted Publishing 发布为 \`${version}\`，并完成公共 PyPI 安装验证。"
+            echo
+            echo "完整变更请参阅 [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_TAG}/CHANGELOG.md)。"
+          } >> release-notes.md
+          gh release create "${RELEASE_TAG}" \
+            --verify-tag \
+            --latest \
+            --title "MatterLoop ${RELEASE_TAG}" \
+            --notes-file release-notes.md

@@ -7,7 +7,7 @@
 **把 Agent 从“一次模型调用”变成可验证、可暂停、可恢复的工程闭环。**
 
 [![Python](https://img.shields.io/badge/Python-3.10--3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![PyPI](https://img.shields.io/pypi/v/matterloop-presets?label=PyPI&color=3775A9)](https://pypi.org/project/matterloop-presets/)
+[![PyPI](https://img.shields.io/pypi/v/matterloop-presets?label=PyPI&color=3775A9&cacheSeconds=300)](https://pypi.org/project/matterloop-presets/)
 [![Typing](https://img.shields.io/badge/typing-py.typed-2F855A)](https://typing.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-7C3AED)](LICENSE)
 
@@ -19,7 +19,7 @@ MatterLoop 是一组可独立安装的 Python 组件，用来构建带计划、�
 Agent 系统。它不绑定模型供应商、Web 框架或存储后端；应用在组合根创建客户端和基础设施，再通过
 协议注入。
 
-> 当前版本为 `0.1.x`。适合原型、内部平台和架构验证；生产部署前请阅读
+> 当前版本为 `0.2.x`。适合原型、内部平台和架构验证；生产部署前请阅读
 > [当前边界](#当前边界) 与 [企业集成指南](docs/enterprise-integration.md)。
 
 ## 为什么需要 Loop

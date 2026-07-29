@@ -41,6 +41,15 @@ jobs:
           uv run --locked python scripts/check_release.py \
             --expected-version "${version}" \
             --tag "${tag}"
+          if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+            {
+              echo "version=${version}"
+              echo "tag=${tag}"
+              echo "release_required=false"
+            } >> "${GITHUB_OUTPUT}"
+            echo "${tag} 已存在；当前 main 没有新版本，跳过标签与发布。"
+            exit 0
+          fi
           previous_tag=""
           while IFS= read -r candidate; do
             if [[ "${candidate}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -63,9 +72,11 @@ jobs:
           {
             echo "version=${version}"
             echo "tag=${tag}"
+            echo "release_required=true"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Create the release tag
+        if: steps.release.outputs.release_required == 'true'
         shell: bash
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
@@ -86,6 +97,7 @@ jobs:
           git push origin "refs/tags/${RELEASE_TAG}"
 
       - name: Dispatch the PyPI publishing workflow
+        if: steps.release.outputs.release_required == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
