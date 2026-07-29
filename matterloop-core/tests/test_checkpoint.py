@@ -8,6 +8,7 @@ from matterloop_core import (
     ArtifactRef,
     CheckpointSchemaError,
     ExecutionResult,
+    ExternalStateRef,
     HumanAction,
     HumanInteractionKind,
     HumanInteractionRecord,
@@ -101,12 +102,21 @@ def test_checkpoint_round_trip_preserves_resume_state() -> None:
             "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
             "tracestate": "vendor=value",
         },
+        external_state_refs=[
+            ExternalStateRef(
+                "model_context",
+                "tenant:run-1:planner:-",
+                4,
+                "abc123",
+            )
+        ],
         started_at=now,
         updated_at=now,
     )
 
     payload = codec.dumps(context)
-    assert set(json.loads(payload)) == {"context"}
+    assert set(json.loads(payload)) == {"schema_version", "context"}
+    assert json.loads(payload)["schema_version"] == 2
 
     restored = codec.loads(payload)
     assert restored.run_id == context.run_id
@@ -126,14 +136,24 @@ def test_checkpoint_round_trip_preserves_resume_state() -> None:
     assert restored.revision == 8
     assert restored.active_elapsed_seconds == 1.25
     assert restored.propagation_context == context.propagation_context
+    assert restored.external_state_refs == context.external_state_refs
 
 
-def test_checkpoint_rejects_versioned_payload() -> None:
-    """未发布的格式不保留 schema_version 兼容入口。"""
+def test_checkpoint_reads_legacy_v1_and_rejects_unknown_versions() -> None:
+    """0.2 编解码器读取旧无版本格式，但拒绝未知版本。"""
     codec = LoopCheckpointCodec()
+    legacy_context = LoopContext(LoopRequest("legacy"))
+    legacy = codec.encode(legacy_context)
+    legacy.pop("schema_version")
+    context_data = legacy["context"]
+    assert isinstance(context_data, dict)
+    context_data.pop("external_state_refs")
 
-    with pytest.raises(CheckpointSchemaError, match="only the current"):
-        codec.loads('{"schema_version":1,"context":{}}')
+    restored = codec.loads(json.dumps(legacy))
+    assert restored.request.goal == "legacy"
+    assert restored.external_state_refs == []
+    with pytest.raises(CheckpointSchemaError, match="unsupported"):
+        codec.loads('{"schema_version":99,"context":{}}')
 
 
 def test_checkpoint_rejects_non_json_metadata() -> None:

@@ -1,6 +1,7 @@
 """MatterLoop 可热替换、可恢复的多智能体协作公共 API。"""
 
 from matterloop_agents.collaboration.artifacts import ArtifactStore, InMemoryArtifactStore
+from matterloop_agents.collaboration.context import ContextAwareTeamRepository
 from matterloop_agents.collaboration.defaults import (
     AcceptAllTeamReviewer,
     AlwaysApproveTeamGate,
@@ -111,6 +112,7 @@ __all__ = [
     "AsyncTeamRuntime",
     "CollaborationError",
     "ConcatenateResultAggregator",
+    "ContextAwareTeamRepository",
     "InMemoryArtifactStore",
     "InMemoryMailbox",
     "InMemoryTeamRepository",

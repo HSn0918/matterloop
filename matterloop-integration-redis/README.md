@@ -9,11 +9,12 @@
 pip install matterloop-integration-redis
 ```
 
-## 四个适配器，四份职责
+## 五个适配器，五份职责
 
 | 适配器 | 保存什么 | 关键保证 |
 | --- | --- | --- |
 | `RedisCheckpointStore` | 完整 `LoopContext` 检查点 | revision CAS；严格的 Core checkpoint schema |
+| `RedisContextStore` | 压缩后的模型 Context 不可变版本 | latest 指针 CAS；显式 TTL；精确 revision 恢复 |
 | `RedisQueueBackend` | 待处理任务、延迟任务、租约和取消标记 | Lua 内的单节点原子状态转换；至少一次投递 |
 | `RedisRunRepository` | `RunRecord` 与创建时间索引 | version CAS，防止并发覆盖 |
 | `RedisEventPublisher` | 每个 run 的 Core 事件 Stream | 有序游标读取；近似长度裁剪 |
@@ -27,13 +28,20 @@ pip install matterloop-integration-redis
 from matterloop_integration_redis import (
     RedisCheckpointStore,
     RedisConfig,
+    RedisContextStore,
     RedisEventPublisher,
     RedisQueueBackend,
     RedisRunRepository,
 )
+from matterloop_runtime import ContextRetentionPolicy
 
 config = RedisConfig(prefix="matterloop:{prod}", lease_seconds=300)
 checkpoints = RedisCheckpointStore(client=redis_client, config=config, codec=None)
+contexts = RedisContextStore(
+    redis_client,
+    ContextRetentionPolicy(86_400, 604_800, 604_800),
+    config,
+)
 queue = RedisQueueBackend(client=redis_client, config=config, codec=None)
 runs = RedisRunRepository(client=redis_client, config=config, codec=None)
 events = RedisEventPublisher(
@@ -43,7 +51,7 @@ events = RedisEventPublisher(
 )
 ```
 
-`redis_client` 由应用创建并配置 TLS、认证、超时和连接池。四个适配器可以共享它，但都不会关闭它。
+`redis_client` 由应用创建并配置 TLS、认证、超时和连接池。五个适配器可以共享它，但都不会关闭它。
 
 `RedisConfig(prefix, lease_seconds, event_max_length)` 只保存非敏感行为配置：默认值分别为
 `"matterloop"`、`60.0` 秒和 `10_000` 条近似事件。连接 URL、用户名和密码不应进入配置对象。

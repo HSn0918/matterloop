@@ -8,14 +8,23 @@ from dataclasses import dataclass
 from typing import Protocol, cast
 
 from matterloop_models.base import (
+    MessageRole,
+    ModelCompactionItem,
+    ModelInputItem,
+    ModelItemCategory,
+    ModelItemRetention,
+    ModelMessageItem,
     ModelRequest,
     ModelResponse,
+    ModelToolCallItem,
+    ModelToolOutputItem,
     TokenUsage,
     ToolCall,
 )
 from matterloop_models.capabilities import ModelCapabilities, ModelDescriptor, ModelFeature
 from matterloop_models.errors import (
     ModelAuthenticationError,
+    ModelCapabilityError,
     ModelInvocationError,
     ModelPaymentRequiredError,
     ModelRateLimitError,
@@ -102,6 +111,8 @@ class OpenAIModelClient:
                         ModelFeature.JSON_OBJECT_OUTPUT,
                         ModelFeature.JSON_SCHEMA_OUTPUT,
                         ModelFeature.RESPONSE_ID_CONTINUATION,
+                        ModelFeature.EXACT_TOKEN_COUNT,
+                        ModelFeature.NATIVE_COMPACTION,
                     }
                 ),
                 unsupported=frozenset({ModelFeature.OPAQUE_CONTINUATION}),
@@ -134,6 +145,46 @@ class OpenAIModelClient:
                 exc.usage = self._parse_usage(response)
             raise
 
+    async def count_input_tokens(self, request: ModelRequest) -> int:
+        """调用 Responses Input Tokens API 精确计算完整请求输入。"""
+        resource = getattr(self._client.responses, "input_tokens", None)
+        count = getattr(resource, "count", None)
+        if not callable(count):
+            raise ModelCapabilityError("OpenAI client does not expose responses.input_tokens.count")
+        parameters = self._build_parameters(request)
+        allowed = {"model", "input", "tools"}
+        try:
+            result = await count(
+                **{key: value for key, value in parameters.items() if key in allowed}
+            )
+        except Exception as exc:
+            raise self._safe_invocation_error(exc) from None
+        tokens = self._read(result, "input_tokens", self._read(result, "total_tokens", None))
+        if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 0:
+            raise ModelResponseParseError("OpenAI token count is invalid")
+        return tokens
+
+    async def compact_input(self, request: ModelRequest) -> tuple[ModelInputItem, ...]:
+        """调用独立 Responses Compact API 并原样封装其规范下一窗口。"""
+        compact = getattr(self._client.responses, "compact", None)
+        if not callable(compact):
+            raise ModelCapabilityError("OpenAI client does not expose responses.compact")
+        parameters = self._build_parameters(request)
+        try:
+            result = await compact(
+                model=self._config.model,
+                input=parameters["input"],
+            )
+        except Exception as exc:
+            raise self._safe_invocation_error(exc) from None
+        output = self._read(result, "output", ())
+        if not isinstance(output, Sequence) or isinstance(output, (str, bytes, bytearray)):
+            raise ModelResponseParseError("OpenAI compact output must be an array")
+        items = tuple(self._parse_compact_item(item) for item in output)
+        if not items:
+            raise ModelResponseParseError("OpenAI compact output is empty")
+        return items
+
     async def aclose(self) -> None:
         """仅在适配器持有客户端所有权时关闭其连接池。"""
         if self._closer is not None:
@@ -143,7 +194,9 @@ class OpenAIModelClient:
         if request.continuation is not None:
             raise ValueError("OpenAI Responses API does not accept chat continuation state")
         parameters: dict[str, object] = {"model": self._config.model}
-        if request.tool_outputs:
+        if request.input_items:
+            parameters["input"] = [self._map_input_item(item) for item in request.input_items]
+        elif request.tool_outputs:
             parameters["input"] = [
                 {
                     "type": "function_call_output",
@@ -194,10 +247,40 @@ class OpenAIModelClient:
     @classmethod
     def _parse_response(cls, response: object) -> ModelResponse:
         tool_calls: list[ToolCall] = []
+        normalized_items: list[ModelInputItem] = []
         output = cls._read(response, "output", ())
         if isinstance(output, Sequence) and not isinstance(output, (str, bytes, bytearray)):
             for item in output:
-                if cls._read(item, "type", "") != "function_call":
+                item_type = cls._read(item, "type", "")
+                if item_type != "function_call":
+                    if item_type != "message":
+                        raw_item = cls._plain_compact_item(item)
+                        response_model = cls._read(response, "model", "unknown")
+                        normalized_items.append(
+                            ModelCompactionItem(
+                                payload=json.dumps(
+                                    raw_item,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                ),
+                                provider="openai",
+                                model=(
+                                    response_model
+                                    if isinstance(response_model, str) and response_model.strip()
+                                    else "unknown"
+                                ),
+                                native=True,
+                                category=ModelItemCategory.AGENT_STATE,
+                                retention=ModelItemRetention.PINNED,
+                                metadata={
+                                    "provider_output_item": True,
+                                    "provider_item_type": (
+                                        item_type if isinstance(item_type, str) else "unknown"
+                                    ),
+                                },
+                            )
+                        )
                     continue
                 arguments = cls._parse_arguments(cls._read(item, "arguments", "{}"))
                 call_id = cls._read(item, "call_id", cls._read(item, "id", ""))
@@ -209,15 +292,28 @@ class OpenAIModelClient:
                     or not name.strip()
                 ):
                     raise ModelResponseParseError("OpenAI function call identifiers are invalid")
-                tool_calls.append(ToolCall(call_id=call_id, name=name, arguments=arguments))
+                tool_call = ToolCall(call_id=call_id, name=name, arguments=arguments)
+                tool_calls.append(tool_call)
+                normalized_items.append(
+                    ModelToolCallItem(
+                        call_id=tool_call.call_id,
+                        name=tool_call.name,
+                        arguments=tool_call.arguments,
+                    )
+                )
 
         token_usage = cls._parse_usage(response)
         response_id = cls._read(response, "id", None)
         output_text = cls._read(response, "output_text", "")
         status = cls._read(response, "status", None)
+        if isinstance(output_text, str) and output_text.strip():
+            normalized_items.append(
+                ModelMessageItem(role=MessageRole.ASSISTANT, content=output_text)
+            )
         return ModelResponse(
             output_text=output_text if isinstance(output_text, str) else "",
             tool_calls=tuple(tool_calls),
+            output_items=tuple(normalized_items),
             usage=token_usage,
             response_id=response_id if isinstance(response_id, str) else None,
             metadata={"provider": "openai", "status": status},
@@ -271,6 +367,91 @@ class OpenAIModelClient:
         if not is_error:
             return output
         return json.dumps({"is_error": True, "content": output}, ensure_ascii=False)
+
+    def _map_input_item(self, item: ModelInputItem) -> dict[str, object]:
+        if isinstance(item, ModelMessageItem):
+            return {
+                "role": item.role.value,
+                "content": item.content,
+                **({"name": item.name} if item.name is not None else {}),
+            }
+        if isinstance(item, ModelToolCallItem):
+            return {
+                "type": "function_call",
+                "call_id": item.call_id,
+                "name": item.name,
+                "arguments": json.dumps(
+                    dict(item.arguments),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            }
+        if isinstance(item, ModelToolOutputItem):
+            return {
+                "type": "function_call_output",
+                "call_id": item.call_id,
+                "output": self._format_tool_output(item.output, item.is_error),
+            }
+        if isinstance(item, ModelCompactionItem):
+            if item.native:
+                if item.provider != "openai":
+                    raise ModelCapabilityError("native compaction item belongs to another provider")
+                try:
+                    raw_item = json.loads(item.payload)
+                except json.JSONDecodeError:
+                    # 兼容 0.2.0 之前仅保存 encrypted_content 的本地开发快照。
+                    return {
+                        "type": "compaction",
+                        "encrypted_content": item.payload,
+                    }
+                if not isinstance(raw_item, dict) or not all(
+                    isinstance(key, str) for key in raw_item
+                ):
+                    raise ModelCapabilityError(
+                        "OpenAI native compaction payload must encode an input item"
+                    )
+                return cast(dict[str, object], raw_item)
+            return {
+                "role": "developer",
+                "content": f"Previous context summary:\n{item.payload}",
+            }
+        raise TypeError(f"unsupported OpenAI input item: {type(item).__name__}")
+
+    def _parse_compact_item(self, item: object) -> ModelInputItem:
+        raw_item = self._plain_compact_item(item)
+        return ModelCompactionItem(
+            payload=json.dumps(
+                raw_item,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            provider="openai",
+            model=self._config.model,
+            native=True,
+        )
+
+    @staticmethod
+    def _plain_compact_item(item: object) -> dict[str, object]:
+        """把 SDK 模型转换为可持久化 JSON，同时保留 Compact 返回的完整项。"""
+        raw: object
+        if isinstance(item, Mapping):
+            raw = dict(item)
+        else:
+            model_dump = getattr(item, "model_dump", None)
+            if callable(model_dump):
+                raw = model_dump(mode="json", exclude_none=True)
+            else:
+                raw = vars(item) if hasattr(item, "__dict__") else None
+        if not isinstance(raw, dict) or not all(isinstance(key, str) for key in raw):
+            raise ModelResponseParseError("OpenAI compact output item is invalid")
+        try:
+            json.dumps(raw, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            raise ModelResponseParseError(
+                "OpenAI compact output item is not JSON serializable"
+            ) from exc
+        return cast(dict[str, object], raw)
 
     @classmethod
     def _safe_invocation_error(cls, error: Exception) -> ModelInvocationError:

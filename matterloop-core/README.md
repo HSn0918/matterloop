@@ -226,7 +226,8 @@ restored = codec.loads(payload)
 ```
 
 当前结构保存计划游标、records、人工历史、批准步骤、执行操作、待验证结果、心跳、活跃计时、event
-sequence、revision 和 `propagation_context`。顶层只允许 `context`；错误字段类型、无时区时间或非 JSON
+sequence、revision、`propagation_context` 和 `external_state_refs`。v2 顶层包含
+`schema_version` 与 `context`，同时兼容读取旧的无版本 v1；错误字段类型、无时区时间或非 JSON
 metadata 会抛 `CheckpointSchemaError`。
 
 一次状态提交的顺序固定为：
@@ -374,7 +375,8 @@ Core 会给组件传入隔离的 `LoopContext` snapshot。修改 snapshot 不会
   `active_operation_id: str | None = None`、`pending_execution: ExecutionResult | None = None`、
   `pending_attempt: int | None = None`、`last_heartbeat_at: datetime | None = None`、
   `active_elapsed_seconds: float = 0`、`active_started_at: datetime | None = None`、
-  `propagation_context: dict[str, str] = {}`、`started_at: datetime = <UTC>`、
+  `propagation_context: dict[str, str] = {}`、`external_state_refs: list[ExternalStateRef] = []`、
+  `started_at: datetime = <UTC>`、
   `updated_at: datetime = <UTC>`。扩展组件拿到的是 snapshot，不能靠
   修改它推进控制器。
 - `LoopEvent`：必填 `event_type: LoopEventType`、`context: LoopContext`；

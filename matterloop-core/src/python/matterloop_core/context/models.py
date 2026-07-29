@@ -138,6 +138,25 @@ class ArtifactRef:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalStateRef:
+    """引用由 Runtime 管理、但必须与检查点一致恢复的外部状态。"""
+
+    kind: str
+    key: str
+    revision: int
+    checksum: str
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        """保证引用能够定位并校验一个精确版本。"""
+        _validate_text(self.kind, "kind")
+        _validate_text(self.key, "key")
+        _validate_text(self.checksum, "checksum")
+        if self.revision < 1 or self.schema_version < 1:
+            raise ValueError("external state reference versions must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionResult:
     """保存执行器输出与制品证据，但不负责判断结果是否正确。"""
 
@@ -226,6 +245,7 @@ class LoopContext:
     active_elapsed_seconds: float = 0
     active_started_at: datetime | None = None
     propagation_context: dict[str, str] = field(default_factory=dict)
+    external_state_refs: list[ExternalStateRef] = field(default_factory=list)
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -263,6 +283,7 @@ class LoopContext:
             active_elapsed_seconds=self.active_elapsed_seconds,
             active_started_at=self.active_started_at,
             propagation_context=dict(self.propagation_context),
+            external_state_refs=list(self.external_state_refs),
             started_at=self.started_at,
             updated_at=self.updated_at,
         )

@@ -6,11 +6,14 @@ import asyncio
 
 import pytest
 from matterloop_models import (
+    ContextInputMode,
     FakeModelClient,
     FakeModelExhaustedError,
     MessageRole,
     ModelAlreadyRegisteredError,
+    ModelContextScope,
     ModelMessage,
+    ModelMessageItem,
     ModelRegistry,
     ModelRequest,
     ModelResponse,
@@ -100,3 +103,36 @@ def test_token_usage_accepts_cache_and_reasoning_dimensions() -> None:
     assert usage.cache_hit_tokens == 7
     assert usage.cache_miss_tokens == 3
     assert usage.reasoning_tokens == 2
+
+
+def test_canonical_input_is_exclusive_and_append_requires_scope() -> None:
+    item = ModelMessageItem(MessageRole.USER, "hello")
+    request = ModelRequest(
+        input_items=(item,),
+        context_scope=ModelContextScope("run-1", "worker"),
+        context_mode=ContextInputMode.APPEND,
+    )
+
+    assert request.input_items == (item,)
+    with pytest.raises(ValueError, match="must not be mixed"):
+        ModelRequest(
+            messages=(ModelMessage(MessageRole.USER, "legacy"),),
+            input_items=(item,),
+        )
+    with pytest.raises(ValueError, match="requires a context scope"):
+        ModelRequest(input_items=(item,), context_mode=ContextInputMode.APPEND)
+
+
+def test_context_values_hide_content_and_scope_keys_cannot_collide() -> None:
+    secret = "private-context-payload"
+    request = ModelRequest(
+        input_items=(ModelMessageItem(MessageRole.USER, secret),),
+    )
+    response = ModelResponse(output_text=secret)
+
+    assert secret not in repr(request)
+    assert secret not in repr(response)
+    left = ModelContextScope("c", "worker", tenant_id="a:b")
+    right = ModelContextScope("b:c", "worker", tenant_id="a")
+    assert left.key != right.key
+    assert "%3A" in left.key

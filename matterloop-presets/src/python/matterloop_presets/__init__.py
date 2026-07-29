@@ -4,6 +4,7 @@ from matterloop_presets.coding import build_coding_local_runtime, build_coding_r
 from matterloop_presets.config import (
     AgentPresetConfig,
     CodingPresetConfig,
+    ContextRuntimeConfig,
     MinimalPresetConfig,
     ProductionPresetConfig,
     ResearchPresetConfig,
@@ -23,6 +24,7 @@ from matterloop_presets.runtime import PresetRuntime, ProductionLocalRuntime, Pr
 __all__ = [
     "AgentPresetConfig",
     "CodingPresetConfig",
+    "ContextRuntimeConfig",
     "MinimalPresetConfig",
     "PresetConfigurationError",
     "PresetError",

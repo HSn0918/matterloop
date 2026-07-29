@@ -11,6 +11,7 @@ from matterloop_models.base import (
     MessageRole,
     ModelMessage,
     ModelRequest,
+    ModelToolOutputItem,
     ToolDefinition,
     ToolOutput,
 )
@@ -277,6 +278,44 @@ def test_compatible_preserves_multi_tool_continuation_order_without_repr_leak() 
             "tool_call_id": "call-b",
             "content": '{"is_error": true, "content": "证据 B"}',
         }
+
+    asyncio.run(scenario())
+
+
+def test_compatible_persists_private_tool_state_in_canonical_items() -> None:
+    """生命周期模式不使用 continuation 时仍须原样续传必要的私有推理字段。"""
+
+    async def scenario() -> None:
+        private_reasoning = "canonical-private-reasoning"
+        sdk_client = StubCompatibleClient(
+            _multi_tool_response(reasoning=private_reasoning),
+            _text_response(),
+        )
+        client = _compatible_client(sdk_client, preserve_reasoning_content=True)
+        first = await client.generate(
+            ModelRequest(messages=(ModelMessage(MessageRole.USER, "并行查询"),))
+        )
+
+        await client.generate(
+            ModelRequest(
+                input_items=(
+                    *first.output_items,
+                    ModelToolOutputItem("call-a", "证据 A"),
+                    ModelToolOutputItem("call-b", "证据 B"),
+                )
+            )
+        )
+
+        messages = sdk_client.completions.parameters[1]["messages"]
+        assert isinstance(messages, list)
+        assert messages[0]["role"] == "assistant"
+        assert messages[0]["reasoning_content"] == private_reasoning
+        assert [call["id"] for call in messages[0]["tool_calls"]] == [
+            "call-a",
+            "call-b",
+        ]
+        assert messages[1]["tool_call_id"] == "call-a"
+        assert messages[2]["tool_call_id"] == "call-b"
 
     asyncio.run(scenario())
 

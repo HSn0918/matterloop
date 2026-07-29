@@ -10,6 +10,35 @@ does not provide a sandbox that can safely run arbitrary code.
 pip install matterloop-runtime
 ```
 
+## Context Lifecycle Engine
+
+`matterloop_runtime.context` owns model-context detection, externalization, compaction, persistence,
+and recovery instead of placing lifecycle logic in model adapters. Only requests carrying a
+`ModelContextScope` are managed; legacy calls without a `ContextPolicy` or scope pass through unchanged.
+
+```python
+from matterloop_runtime import (
+    ContextLifecycleManager,
+    ContextManagedModelClient,
+    ContextPolicy,
+    InMemoryContextBlobStore,
+    InMemoryContextStore,
+)
+
+manager = ContextLifecycleManager(
+    ContextPolicy(max_context_tokens=128_000),
+    InMemoryContextStore(),
+    InMemoryContextBlobStore(),
+    semantic_compactor=summary_compactor,
+)
+model = ContextManagedModelClient(base_model, manager)
+```
+
+The defaults attempt compaction at 70%, block at 85%, and target 55%. System instructions, task
+goals, current state, and unresolved Tool Call/Output pairs remain pinned. Large results go to a
+`ContextBlobStore`; only a summary, checksum, and URI remain in context. Production deployments
+should provide persistent storage and an explicit `ContextRetentionPolicy`.
+
 ## Three entry points
 
 ### Asynchronous applications

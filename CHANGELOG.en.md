@@ -7,8 +7,15 @@ version entry covers the complete component set instead of maintaining separate 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-28
+
 ### Added
 
+- Added the Runtime-native Context Lifecycle Engine for token pressure, tool-result externalization,
+  native/semantic compaction, immutable snapshots, Redis CAS, long-run recovery, and opt-in memory
+  extraction without adding a distribution.
+- Added canonical context input, model context scopes, exact token counting, and native compaction
+  protocols to Models; all built-in Agent and Team model calls now carry stable scopes.
 - Added tree-shaped tracing and scoring to observability: `TraceBuilder` rebuilds the lifecycle event
   stream into a span tree, `BatchingPipeline` batches `SpanRecord` and `Score` exports to JSONL or OTLP/HTTP
   exporters, and `TracedModelClient` wraps a model client to record generation spans automatically.
@@ -34,8 +41,8 @@ version entry covers the complete component set instead of maintaining separate 
 
 ### Changed
 
-- The current checkpoint layout adds `propagation_context` and no longer carries `schema_version`; the
-  Codec accepts only the complete layout with top-level `context`.
+- Checkpoints now use schema v2 with both `propagation_context` and `external_state_refs`; legacy
+  unversioned v1 payloads remain readable.
 - Standardized trace span names on fixed `matterloop.*` semantics and moved dynamic agent/executor data to
   attributes. `OtelExporter.aclose()` now force-flushes every Provider and shuts down only an owned Provider.
   This is an incompatible observability-schema change; existing dashboards, alerts, and queries must

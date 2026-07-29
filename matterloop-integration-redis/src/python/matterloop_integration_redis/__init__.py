@@ -3,6 +3,7 @@
 from matterloop_integration_redis.checkpoint import RedisCheckpointStore
 from matterloop_integration_redis.client import AsyncRedisClient, RedisConfig
 from matterloop_integration_redis.codec import RedisPayloadCodec
+from matterloop_integration_redis.context import RedisContextStore
 from matterloop_integration_redis.errors import RedisIntegrationError, RedisPayloadError
 from matterloop_integration_redis.events import RedisEventPublisher
 from matterloop_integration_redis.queue import RedisQueueBackend
@@ -12,6 +13,7 @@ __all__ = [
     "AsyncRedisClient",
     "RedisCheckpointStore",
     "RedisConfig",
+    "RedisContextStore",
     "RedisEventPublisher",
     "RedisIntegrationError",
     "RedisPayloadCodec",

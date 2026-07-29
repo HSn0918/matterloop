@@ -9,6 +9,34 @@ Runtime 把 Loop 变成应用可以调用的服务边界：异步执行、同步
 pip install matterloop-runtime
 ```
 
+## Context Lifecycle Engine
+
+`matterloop_runtime.context` 负责模型上下文的检测、外置、压缩、持久化和恢复，不把生命周期逻辑塞进
+模型适配器。只有带 `ModelContextScope` 的请求会被管理；没有 `ContextPolicy` 或没有作用域的旧调用
+保持原样。
+
+```python
+from matterloop_runtime import (
+    ContextLifecycleManager,
+    ContextManagedModelClient,
+    ContextPolicy,
+    InMemoryContextBlobStore,
+    InMemoryContextStore,
+)
+
+manager = ContextLifecycleManager(
+    ContextPolicy(max_context_tokens=128_000),
+    InMemoryContextStore(),
+    InMemoryContextBlobStore(),
+    semantic_compactor=summary_compactor,
+)
+model = ContextManagedModelClient(base_model, manager)
+```
+
+默认在 70% 尝试压缩、85% 强制阻断、压缩到 55% 目标；系统指令、任务目标、当前状态和未闭合
+Tool Call/Output 固定保留。大结果先写 `ContextBlobStore`，Context 只保留摘要、哈希和 URI。
+生产环境应使用持久化 `ContextStore`、对象存储和显式 `ContextRetentionPolicy`。
+
 ## 三种入口
 
 ### 异步应用

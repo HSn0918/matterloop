@@ -241,8 +241,9 @@ restored = codec.loads(payload)
 ```
 
 The current layout stores the plan cursor, records, human history, approved steps, execution operation,
-pending verification result, heartbeat, active timing, event sequence, revision, and
-`propagation_context`. Its top level permits only `context`; incorrectly typed fields,
+pending verification result, heartbeat, active timing, event sequence, revision,
+`propagation_context`, and `external_state_refs`. The v2 root contains `schema_version` and
+`context` while still reading legacy unversioned v1 payloads; incorrectly typed fields,
 timezone-naive timestamps, or non-JSON metadata raise `CheckpointSchemaError`.
 
 Every state commit follows this fixed order:
@@ -406,7 +407,8 @@ its values must still be JSON-serializable when persisted.
   `active_operation_id: str | None = None`, `pending_execution: ExecutionResult | None = None`,
   `pending_attempt: int | None = None`, `last_heartbeat_at: datetime | None = None`,
   `active_elapsed_seconds: float = 0`, `active_started_at: datetime | None = None`,
-  `propagation_context: dict[str, str] = {}`, `started_at: datetime = <UTC>`,
+  `propagation_context: dict[str, str] = {}`,
+  `external_state_refs: list[ExternalStateRef] = []`, `started_at: datetime = <UTC>`,
   `updated_at: datetime = <UTC>`. Extension components receive a
   snapshot and cannot advance the controller by mutating it.
 - `LoopEvent`: required `event_type: LoopEventType`, `context: LoopContext`;

@@ -7,8 +7,14 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-28
+
 ### Added
 
+- Runtime 内置 Context Lifecycle Engine：覆盖 Token 监测、工具结果外置、原生/语义压缩、不可变快照、
+  Redis CAS、长期任务恢复和可选记忆抽取，不新增发行包。
+- Models 新增规范化上下文输入、模型上下文作用域、精确 Token 计数和原生压缩能力协议；Agent 与 Team
+  全部模型调用接入稳定作用域。
 - Observability 新增树形 tracing 与评分：`TraceBuilder` 把生命周期事件流重建为跨度树，
   `BatchingPipeline` 聚批导出 `SpanRecord` 与 `Score`，提供 JSONL 与 OTLP/HTTP 两种导出器；
   `TracedModelClient` 包装模型客户端自动记录 generation 跨度。
@@ -32,8 +38,8 @@
 
 ### Changed
 
-- Checkpoint 当前结构新增 `propagation_context`，不再携带 `schema_version`；Codec 只接受顶层为
-  `context` 的完整结构。
+- Checkpoint 升级到 schema v2，同时包含 `propagation_context` 与 `external_state_refs`，并兼容读取旧的
+  无版本 v1。
 - Trace Span 名称统一为固定的 `matterloop.*` 语义，动态 agent/executor 信息改为属性；
   `OtelExporter.aclose()` 会 force-flush，并只 shutdown 自己创建的 Provider。
   这是观测 schema 的不兼容变更；现有 dashboard、告警和查询必须迁移到新的固定 Span 名称。
