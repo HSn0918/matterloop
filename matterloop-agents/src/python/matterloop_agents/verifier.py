@@ -24,6 +24,13 @@ from matterloop_agents._parsing import (
     string_tuple,
 )
 from matterloop_agents.config import CriteriaVerifierConfig
+from matterloop_agents.errors import AgentModelOutputError
+from matterloop_agents.scoring import (
+    CriterionAssessment,
+    ModelReportedScorer,
+    VerificationAssessment,
+    VerificationScorer,
+)
 
 _VERIFICATION_SCHEMA: Mapping[str, object] = {
     "type": "object",
@@ -34,8 +41,30 @@ _VERIFICATION_SCHEMA: Mapping[str, object] = {
         "feedback": {"type": "string"},
         "evidence": {"type": "array", "items": {"type": "string"}},
         "failed_criteria": {"type": "array", "items": {"type": "string"}},
+        "criterion_assessments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "criterion": {"type": "string"},
+                    "passed": {"type": "boolean"},
+                    "score": {"type": "number", "minimum": 0, "maximum": 100},
+                    "evidence": {"type": "array", "items": {"type": "string"}},
+                    "feedback": {"type": "string"},
+                },
+                "required": ["criterion", "passed", "score", "evidence", "feedback"],
+            },
+        },
     },
-    "required": ["passed", "score", "feedback", "evidence", "failed_criteria"],
+    "required": [
+        "passed",
+        "score",
+        "feedback",
+        "evidence",
+        "failed_criteria",
+        "criterion_assessments",
+    ],
 }
 
 
@@ -47,9 +76,15 @@ class CriteriaVerifier:
         config: 验证分数阈值和输出预算配置。
     """
 
-    def __init__(self, models: ModelRegistry, config: CriteriaVerifierConfig) -> None:
+    def __init__(
+        self,
+        models: ModelRegistry,
+        config: CriteriaVerifierConfig,
+        scorer: VerificationScorer | None = None,
+    ) -> None:
         self._models = models
         self._config = config
+        self._scorer = scorer or ModelReportedScorer(pass_score=config.pass_score)
 
     async def verify(
         self,
@@ -71,8 +106,12 @@ class CriteriaVerifier:
             messages=(
                 ModelMessage(
                     MessageRole.DEVELOPER,
-                    "你是独立验证器。只依据提供的结果、产物引用和验收条件判断；"
-                    "没有证据时不得推定通过。",
+                    "You are an independent verifier. Judge only from the provided "
+                    "result, artifact references, and acceptance criteria. Never infer "
+                    "success without evidence. Every criterion in failed_criteria and "
+                    "criterion_assessments must exactly match a provided acceptance "
+                    "criterion. Return one criterion_assessments entry per criterion "
+                    "with passed, a score from 0 to 100, evidence, and feedback.",
                 ),
                 ModelMessage(MessageRole.USER, self._verification_payload(step, result, context)),
             ),
@@ -95,15 +134,53 @@ class CriteriaVerifier:
         value = parse_json_object(response.output_text, purpose="verifier")
         score = require_score(value, "score", purpose="verifier")
         failed_criteria = string_tuple(value, "failed_criteria", purpose="verifier")
+        evidence = string_tuple(value, "evidence", purpose="verifier")
+        criterion_assessments = self._criterion_assessments(value)
         model_passed = require_boolean(value, "passed", purpose="verifier")
-        passed = model_passed and score >= self._config.pass_score and not failed_criteria
-        return VerificationResult(
-            passed=passed,
-            feedback=require_string(value, "feedback", purpose="verifier"),
-            score=score,
-            evidence=string_tuple(value, "evidence", purpose="verifier"),
-            failed_criteria=failed_criteria,
+        criteria = step.acceptance_criteria or context.request.acceptance_criteria
+        scoring = self._scorer.score(
+            VerificationAssessment(
+                criteria=criteria,
+                model_passed=model_passed,
+                model_score=score,
+                failed_criteria=failed_criteria,
+                evidence=evidence,
+                criterion_assessments=criterion_assessments,
+            )
         )
+        return VerificationResult(
+            passed=scoring.passed,
+            feedback=require_string(value, "feedback", purpose="verifier"),
+            score=scoring.score,
+            evidence=evidence,
+            failed_criteria=scoring.failed_criteria,
+        )
+
+    @staticmethod
+    def _criterion_assessments(
+        value: Mapping[str, object],
+    ) -> tuple[CriterionAssessment, ...]:
+        """解析可选的逐条件评分，并兼容旧版验证器响应。"""
+        raw_items = value.get("criterion_assessments")
+        if raw_items is None:
+            return ()
+        if not isinstance(raw_items, list):
+            raise AgentModelOutputError("verifier.criterion_assessments must be an array")
+        assessments: list[CriterionAssessment] = []
+        for index, raw_item in enumerate(raw_items):
+            purpose = f"verifier.criterion_assessments[{index}]"
+            if not isinstance(raw_item, Mapping):
+                raise AgentModelOutputError(f"{purpose} must be an object")
+            assessments.append(
+                CriterionAssessment(
+                    criterion=require_string(raw_item, "criterion", purpose=purpose),
+                    passed=require_boolean(raw_item, "passed", purpose=purpose),
+                    score=require_score(raw_item, "score", purpose=purpose),
+                    evidence=string_tuple(raw_item, "evidence", purpose=purpose),
+                    feedback=require_string(raw_item, "feedback", purpose=purpose),
+                )
+            )
+        return tuple(assessments)
 
     @staticmethod
     def _usage_scopes(context: LoopContext) -> tuple[str, ...]:

@@ -45,8 +45,27 @@ from matterloop_agents.errors import (
     ToolLoopLimitError,
     UnauthorizedToolCallError,
 )
+from matterloop_agents.intent import (
+    ConfidenceIntentResolver,
+    IntentCandidate,
+    IntentClassifier,
+    IntentDecision,
+    IntentEffect,
+    IntentRequest,
+    IntentResolution,
+    IntentResolver,
+)
 from matterloop_agents.planner import ModelPlanner
 from matterloop_agents.reviewer import ModelReviewer, ReviewerVerifierAdapter, ReviewResult
+from matterloop_agents.scoring import (
+    CriteriaCoverageScorer,
+    CriterionAssessment,
+    ModelReportedScorer,
+    VerificationAssessment,
+    VerificationScore,
+    VerificationScorer,
+    WeightedRubricScorer,
+)
 from matterloop_agents.verifier import CriteriaVerifier
 from matterloop_agents.worker import ToolCallingWorker
 
@@ -58,8 +77,17 @@ __all__ = [
     "AsyncTeamRuntime",
     "CriteriaVerifier",
     "CriteriaVerifierConfig",
+    "CriterionAssessment",
     "ContextAwareTeamRepository",
+    "ConfidenceIntentResolver",
     "InMemoryTeamRepository",
+    "IntentCandidate",
+    "IntentClassifier",
+    "IntentDecision",
+    "IntentEffect",
+    "IntentRequest",
+    "IntentResolution",
+    "IntentResolver",
     "LeastBusyScheduler",
     "LocalTeamRuntime",
     "LoopAgentEndpoint",
@@ -69,6 +97,7 @@ __all__ = [
     "ModelPlannerConfig",
     "ModelReviewer",
     "ModelReviewerConfig",
+    "ModelReportedScorer",
     "ModelTaskVerifier",
     "ModelTaskVerifierConfig",
     "ModelTeamPlanner",
@@ -78,6 +107,7 @@ __all__ = [
     "PlanStepLimitError",
     "ReviewResult",
     "ReviewerVerifierAdapter",
+    "CriteriaCoverageScorer",
     "TaskSpec",
     "TeamCycleRecord",
     "TeamInstrumentation",
@@ -96,4 +126,8 @@ __all__ = [
     "ToolContinuationError",
     "ToolLoopLimitError",
     "UnauthorizedToolCallError",
+    "VerificationAssessment",
+    "VerificationScore",
+    "VerificationScorer",
+    "WeightedRubricScorer",
 ]
