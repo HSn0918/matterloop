@@ -74,15 +74,15 @@ Tools, Memory, Policies, Agents, and Observability. It does not install FastAPI,
 ```bash
 # Application development: accept compatible updates in the 0.2 series
 python -m pip install --index-url https://pypi.org/simple \
-  "matterloop-presets>=0.2.0,<0.3.0"
+  "matterloop-presets>=0.2.1,<0.3.0"
 
 # Production and CI: pin an artifact version that you have validated
 python -m pip install --index-url https://pypi.org/simple \
-  "matterloop-presets==0.2.0"
+  "matterloop-presets==0.2.1"
 ```
 
-All 12 `v0.2.0` distributions provide a wheel, an sdist, and Trusted Publishing attestations. See the
-[GitHub Release](https://github.com/huleidada/matterloop/releases/tag/v0.2.0) for the corresponding release record.
+All 12 `v0.2.1` distributions provide a wheel, an sdist, and Trusted Publishing attestations. See the
+[GitHub Release](https://github.com/huleidada/matterloop/releases/tag/v0.2.1) for the corresponding release record.
 Install into a virtual environment and use `python -m pip` so the artifacts go to the intended Python interpreter.
 
 ### Install components on demand
@@ -108,12 +108,12 @@ be pulled directly from PyPI, and pip resolves its declared MatterLoop dependenc
 For example, install only Core and the model abstraction, or add one queue integration to the base composition:
 
 ```bash
-python -m pip install "matterloop-core>=0.2.0,<0.3.0" \
-  "matterloop-models>=0.2.0,<0.3.0"
+python -m pip install "matterloop-core>=0.2.1,<0.3.0" \
+  "matterloop-models>=0.2.1,<0.3.0"
 
-python -m pip install "matterloop-presets==0.2.0" \
-  "matterloop-integration-fastapi==0.2.0" \
-  "matterloop-integration-celery==0.2.0"
+python -m pip install "matterloop-presets==0.2.1" \
+  "matterloop-integration-fastapi==0.2.1" \
+  "matterloop-integration-celery==0.2.1"
 ```
 
 Celery push queues and Redis pull queues are alternative task transports; select one for a deployment.
@@ -126,11 +126,11 @@ Provider SDKs, MCP, and OpenTelemetry are not installed by `matterloop-presets`.
 
 ```bash
 # OpenAI SDK; it can also construct OpenAI-compatible clients for DeepSeek, Qwen, Zhipu, and MiniMax
-python -m pip install "matterloop-models[openai]>=0.2.0,<0.3.0"
+python -m pip install "matterloop-models[openai]>=0.2.1,<0.3.0"
 
 # MCP SDK and OpenTelemetry API
-python -m pip install "matterloop-tools[mcp]>=0.2.0,<0.3.0" \
-  "matterloop-observability[otel]>=0.2.0,<0.3.0"
+python -m pip install "matterloop-tools[mcp]>=0.2.1,<0.3.0" \
+  "matterloop-observability[otel]>=0.2.1,<0.3.0"
 ```
 
 The application still constructs and injects SDK clients, model names, endpoints, connection pools, and credentials.
@@ -146,7 +146,7 @@ index:
 ```bash
 python -m pip install \
   --index-url https://packages.example.com/repository/pypi/simple \
-  "matterloop-presets==0.2.0"
+  "matterloop-presets==0.2.1"
 ```
 
 - Use one enterprise index that proxies public PyPI, or ensure it contains all eight foundation distributions and
@@ -164,7 +164,7 @@ Air-gapped environments can install from a scanned and approved wheelhouse witho
 
 ```bash
 python -m pip install --no-index --find-links /opt/matterloop-wheelhouse \
-  "matterloop-presets==0.2.0"
+  "matterloop-presets==0.2.1"
 ```
 
 ### Verify the installation
@@ -177,7 +177,7 @@ python -m pip check
 python -c "from importlib.metadata import version; import matterloop_core, matterloop_presets; print(version('matterloop-presets'))"
 ```
 
-The expected version is `0.2.0`, and `pip check` should report `No broken requirements found`.
+The expected version is `0.2.1`, and `pip check` should report `No broken requirements found`.
 
 ## Quick start
 

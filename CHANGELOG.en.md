@@ -7,6 +7,29 @@ version entry covers the complete component set instead of maintaining separate 
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-29
+
+### Added
+
+- Added `OpenTelemetryToolMiddleware` to record Tool, Skill, and MCP calls. By default it records only
+  payload size, SHA-256, and allowlisted semantic attributes. Verbatim bounded payload capture requires
+  explicit `capture_tool_payloads=True` (4096 bytes by default and configurable through
+  `capture_max_body_bytes`); the production preset accepts explicit `tools` and `tool_authorizer` inputs.
+- Added live OTel topology for Team and child-Agent execution. Team snapshots persist the W3C carrier,
+  preserving `matterloop.team -> matterloop.team.agent -> matterloop.run` parentage across pauses,
+  blocks, and cross-process resume.
+
+### Changed
+
+- Checkpoint schema v2 now contains both `propagation_context` and `external_state_refs` while retaining
+  read compatibility with legacy unversioned v1 payloads.
+- Standardized trace span names on fixed `matterloop.*` semantics and moved dynamic agent/executor data to
+  attributes. `OtelExporter.aclose()` now force-flushes every Provider and shuts down only an owned Provider.
+  This is an incompatible observability-schema change; existing dashboards, alerts, and queries must
+  migrate to the new fixed Span names.
+- Runtime close now drains in-flight Loop and tool calls before closing tools, models, and exporters, so a
+  late-ending `matterloop.tool` span cannot be lost after its Provider has shut down.
+
 ## [0.2.0] - 2026-07-28
 
 ### Added
@@ -28,27 +51,14 @@ version entry covers the complete component set instead of maintaining separate 
   during Loop execution and `OpenTelemetryModelClient` records nested generation spans, so database/HTTP
   auto-instrumentation joins the same trace; a block or pause persists W3C `traceparent`/`tracestate` in
   the same checkpoint CAS and resume creates a real child Span, while `run_id` remains business correlation.
-- Added `OpenTelemetryToolMiddleware` to record Tool, Skill, and MCP calls. By default it records only
-  payload size, SHA-256, and allowlisted semantic attributes. Verbatim bounded payload capture requires
-  explicit `capture_tool_payloads=True` (4096 bytes by default and configurable through
-  `capture_max_body_bytes`); the production preset accepts explicit `tools` and `tool_authorizer` inputs.
-- Added live OTel topology for Team and child-Agent execution. Team snapshots persist the W3C carrier,
-  preserving `matterloop.team -> matterloop.team.agent -> matterloop.run` parentage across pauses,
-  blocks, and cross-process resume.
 - Added the Core `CheckpointPreparer` protocol and `LoopContext.propagation_context`, allowing event
   publishers to place durable correlation data such as W3C propagation context into the checkpoint CAS;
   `CompositeEventPublisher` forwards the hook.
 
 ### Changed
 
-- Checkpoints now use schema v2 with both `propagation_context` and `external_state_refs`; legacy
-  unversioned v1 payloads remain readable.
-- Standardized trace span names on fixed `matterloop.*` semantics and moved dynamic agent/executor data to
-  attributes. `OtelExporter.aclose()` now force-flushes every Provider and shuts down only an owned Provider.
-  This is an incompatible observability-schema change; existing dashboards, alerts, and queries must
-  migrate to the new fixed Span names.
-- Runtime close now drains in-flight Loop and tool calls before closing tools, models, and exporters, so a
-  late-ending `matterloop.tool` span cannot be lost after its Provider has shut down.
+- Upgraded checkpoints to schema v2 with `external_state_refs` while retaining read compatibility
+  with legacy unversioned v1 payloads.
 
 ### Deprecated
 
@@ -118,7 +128,9 @@ version entry covers the complete component set instead of maintaining separate 
 - Shell tools execute argv directly, while filesystem and HTTP tools enforce path, protocol, host, and response-size
   boundaries.
 
-[Unreleased]: https://github.com/huleidada/matterloop/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/huleidada/matterloop/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/huleidada/matterloop/releases/tag/v0.2.1
+[0.2.0]: https://github.com/huleidada/matterloop/releases/tag/v0.2.0
 [0.1.2]: https://github.com/huleidada/matterloop/releases/tag/v0.1.2
 [0.1.1]: https://github.com/huleidada/matterloop/releases/tag/v0.1.1
 [0.1.0]: https://github.com/huleidada/matterloop/releases/tag/v0.1.0
