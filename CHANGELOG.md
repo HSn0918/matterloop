@@ -7,6 +7,20 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-29
+
+### Added
+
+- Agents 新增可组合的意图识别架构：通过强类型候选、优先级、置信度与冲突阈值解析多意图输入，
+  并在信号不足或候选冲突时显式返回不确定结果，避免错误路由。
+- Agents 新增可插拔评分架构：支持逐条件证据、权重、最低分、必选条件和归一化总分，使不同任务
+  能选择合适的评分策略，而不把特定业务验收字段写死在通用运行时中。
+
+### Changed
+
+- `CriteriaVerifier` 现在按条件逐项生成结构化评估，并通过注入的评分策略计算最终结果；
+  验证提示词和运行时协议字段统一使用英文，中文保留在代码注释与说明文档中。
+
 ## [0.2.1] - 2026-07-29
 
 ### Added
@@ -110,7 +124,8 @@
 - 模型 continuation/reasoning 不进入公开结果，日志与事件支持敏感字段脱敏。
 - Shell 工具使用 argv 调用，文件与 HTTP 工具提供路径、协议、host 和响应大小边界。
 
-[Unreleased]: https://github.com/huleidada/matterloop/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/huleidada/matterloop/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/huleidada/matterloop/releases/tag/v0.2.2
 [0.2.1]: https://github.com/huleidada/matterloop/releases/tag/v0.2.1
 [0.2.0]: https://github.com/huleidada/matterloop/releases/tag/v0.2.0
 [0.1.2]: https://github.com/huleidada/matterloop/releases/tag/v0.1.2

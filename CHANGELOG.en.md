@@ -7,6 +7,22 @@ version entry covers the complete component set instead of maintaining separate 
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-29
+
+### Added
+
+- Added a composable intent-resolution architecture to Agents. Strongly typed candidates, priorities,
+  confidence values, and conflict thresholds resolve multi-intent inputs while explicitly reporting
+  uncertainty when signals are insufficient or candidates conflict.
+- Added a pluggable scoring architecture to Agents with per-criterion evidence, weights, minimum scores,
+  required criteria, and normalized totals. Different task types can select appropriate scoring policies
+  without hard-coding business-specific acceptance fields into the generic runtime.
+
+### Changed
+
+- `CriteriaVerifier` now produces structured per-criterion evaluations and delegates its final decision to
+  an injected scoring policy. Verification prompts and runtime protocol fields consistently use English.
+
 ## [0.2.1] - 2026-07-29
 
 ### Added
@@ -128,7 +144,8 @@ version entry covers the complete component set instead of maintaining separate 
 - Shell tools execute argv directly, while filesystem and HTTP tools enforce path, protocol, host, and response-size
   boundaries.
 
-[Unreleased]: https://github.com/huleidada/matterloop/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/huleidada/matterloop/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/huleidada/matterloop/releases/tag/v0.2.2
 [0.2.1]: https://github.com/huleidada/matterloop/releases/tag/v0.2.1
 [0.2.0]: https://github.com/huleidada/matterloop/releases/tag/v0.2.0
 [0.1.2]: https://github.com/huleidada/matterloop/releases/tag/v0.1.2
