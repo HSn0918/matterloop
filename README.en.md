@@ -7,7 +7,7 @@
 **Turn an Agent from a one-shot model call into a verifiable, pausable, and recoverable engineering loop.**
 
 [![Python](https://img.shields.io/badge/Python-3.10--3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![PyPI](https://img.shields.io/pypi/v/matterloop-presets?label=PyPI&color=3775A9)](https://pypi.org/project/matterloop-presets/)
+[![PyPI](https://img.shields.io/pypi/v/matterloop-presets?label=PyPI&color=3775A9&cacheSeconds=300)](https://pypi.org/project/matterloop-presets/)
 [![Typing](https://img.shields.io/badge/typing-py.typed-2F855A)](https://typing.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-7C3AED)](LICENSE)
 
@@ -20,7 +20,7 @@ execution, verification, human feedback, budgets, and audit trails. It does not 
 provider, web framework, or storage backend. Applications construct clients and infrastructure in their composition
 root and inject them through protocols.
 
-> The current version is `0.1.x`. It is suitable for prototypes, internal platforms, and architecture validation.
+> The current version is `0.2.x`. It is suitable for prototypes, internal platforms, and architecture validation.
 > Before a production deployment, read [Current boundaries](#current-boundaries) and the
 > [Enterprise integration guide](docs/enterprise-integration.en.md).
 
