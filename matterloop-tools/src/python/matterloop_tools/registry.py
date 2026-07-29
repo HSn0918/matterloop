@@ -65,6 +65,7 @@ class ToolRegistry:
         self._invocations_drained = asyncio.Event()
         self._invocations_drained.set()
         self._closing = False
+        self._close_task: asyncio.Task[None] | None = None
 
     async def register(self, tool: Tool, *, replace: bool = False) -> None:
         """注册工具，并在允许时安全替换同名实例。
@@ -168,11 +169,26 @@ class ToolRegistry:
             await self._end_invocation()
 
     async def aclose(self) -> None:
-        """拒绝新调用，等待在途调用及其 Span 结束后关闭工具。"""
+        """拒绝新调用，等待在途调用及其 Span 结束后关闭工具；可并发、可重复调用。"""
         async with self._invocation_lock:
-            self._closing = True
+            if self._close_task is None:
+                self._closing = True
+                self._close_task = asyncio.create_task(self._close_components())
+                self._close_task.add_done_callback(self._consume_close_exception)
+            close_task = self._close_task
+        await asyncio.shield(close_task)
+
+    async def _close_components(self) -> None:
+        """独立于任一等待方完成调用 drain 与工具关闭。"""
         await self._invocations_drained.wait()
         await self._components.aclose()
+
+    @staticmethod
+    def _consume_close_exception(task: asyncio.Task[None]) -> None:
+        """避免所有等待方均被取消时产生未获取的后台 Task 异常告警。"""
+        if task.cancelled():
+            return
+        task.exception()
 
     async def _begin_invocation(self) -> None:
         """在关闭开始前登记一次完整的中间件包裹调用。"""

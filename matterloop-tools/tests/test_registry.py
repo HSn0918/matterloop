@@ -392,6 +392,29 @@ async def test_registry_close_waits_for_active_invocation_to_finish() -> None:
     assert tool.closed
 
 
+async def test_cancelled_registry_close_waiter_does_not_abandon_tool_close() -> None:
+    """取消关闭等待方不能中止已经开始的工具释放流程。"""
+    tool = BlockingTool()
+    registry = ToolRegistry([tool])
+    invocation = asyncio.create_task(registry.invoke("blocking", {}, context=ToolContext("run")))
+    await tool.started.wait()
+    first_waiter = asyncio.create_task(registry.aclose())
+    await asyncio.sleep(0)
+
+    first_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_waiter
+
+    tool.release.set()
+    assert (await invocation).content == "done"
+    for _ in range(10):
+        if tool.closed:
+            break
+        await asyncio.sleep(0)
+
+    assert tool.closed
+
+
 def test_tool_spec_resolves_operation_effect_case_insensitively() -> None:
     spec = ToolSpec(
         "operation-tool",
